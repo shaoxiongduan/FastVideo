@@ -3,9 +3,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from fastvideo.configs.models.dits.base import DiTArchConfig, DiTConfig
+from fastvideo.models.dits.minimax_h3_lora import (
+    convert_comfy_h3_lora,
+    is_comfy_h3_lora,
+)
 from fastvideo.platforms import AttentionBackendEnum
 
 
@@ -15,6 +21,23 @@ def _is_minimax_h3_block(name: str, module: object) -> bool:
     parts = name.split(".")
     return ((len(parts) == 2 and parts[0] == "transformer_blocks" and parts[1].isdigit())
             or (len(parts) == 3 and parts[:2] == ["token_refiner", "refiner_blocks"] and parts[2].isdigit()))
+
+
+def _convert_minimax_h3_lora(state_dict: dict[str, Any], transformer: Any) -> dict[str, Any]:
+    """Map a ComfyUI-format H3 adapter onto FastVideo's parameter names.
+
+    Every published H3 adapter targets the ComfyUI repack, which fuses Q/K/V and
+    names the blocks differently. Adapters already written against FastVideo's
+    names are left alone. Against a rank-reduced checkpoint the AdaLN factors are
+    folded into the stored basis, so one published adapter serves both.
+    """
+    if not is_comfy_h3_lora(state_dict):
+        return state_dict
+    basis = getattr(transformer, "adaln_basis", None)
+    return convert_comfy_h3_lora(
+        state_dict,
+        adaln_basis_weight=None if basis is None else basis.weight.data,
+    )
 
 
 @dataclass
@@ -39,6 +62,15 @@ class MiniMaxH3ArchConfig(DiTArchConfig):
             r"^(.*)\.ff\.net\.0\.proj\.(.*)$": r"\1.ff.fc_in.\2",
             r"^(.*)\.ff\.net\.2\.(.*)$": r"\1.ff.fc_out.\2",
         })
+    # Declared as a field, not a bare class attribute: a function stored on the
+    # class would bind as a method on attribute access and receive the config as
+    # its first argument.
+    lora_state_dict_converter: Callable[[dict[str, Any], Any], dict[str, Any]] | None = field(
+        default=_convert_minimax_h3_lora)
+    # Boundary projections and the AdaLN basis: no published adapter touches
+    # them, and wrapping a layer costs a CPU copy of its weight.
+    exclude_lora_layers: list[str] = field(
+        default_factory=lambda: ["proj_in", "proj_out", "context_embedder", "time_embedder", "adaln_basis"])
     num_attention_heads: int = 56
     attention_head_dim: int = 128
     hidden_size: int = 5376
