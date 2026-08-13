@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +15,12 @@ class DiTArchConfig(ArchConfig):
     param_names_mapping: dict = field(default_factory=dict)
     reverse_param_names_mapping: dict = field(default_factory=dict)
     lora_param_names_mapping: dict = field(default_factory=dict)
+    # Applied to a loaded adapter before the name mappings above, for edits a
+    # regex substitution cannot express: splitting one fused projection into
+    # several, or reprojecting a factor onto weights the checkpoint stores in a
+    # different basis. Receives the adapter and the transformer it is being
+    # loaded into, and returns the rewritten adapter.
+    lora_state_dict_converter: Callable[[dict[str, Any], Any], dict[str, Any]] | None = None
     # When True, the denoising stage casts text/prompt embeddings to the DiT's
     # working dtype before the diffusion loop. Flux2 requires this (BFL casts ctx
     # to bf16 before denoising); models with fp32 text encoders (Wan, Hunyuan15,

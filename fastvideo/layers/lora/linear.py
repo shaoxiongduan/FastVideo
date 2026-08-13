@@ -64,6 +64,22 @@ class BaseLayerWithLoRA(nn.Module):
             self.lora_A = None
             self.lora_B = None
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """The wrapped layer's weight, merged if an adapter has been merged.
+
+        Models that read ``layer.weight`` keep working once the layer is
+        wrapped: H3 casts its input to the AdaLN projection's dtype, for
+        instance. Without this ``nn.Module.__getattr__`` raises, since the
+        parameter lives on ``base_layer``. Read-only on purpose, because the
+        merge and unmerge paths assign through ``base_layer``.
+        """
+        return self.base_layer.weight
+
+    @property
+    def bias(self) -> torch.Tensor | None:
+        return getattr(self.base_layer, "bias", None)
+
     @torch.compile()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         lora_A = self.lora_A

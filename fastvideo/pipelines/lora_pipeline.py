@@ -316,6 +316,14 @@ class LoRAPipeline(ComposedPipelineBase):
             lora_local_path = maybe_download_lora(lora_path)
             lora_state_dict = load_file(lora_local_path)
 
+            # Model-declared rewrite for edits the regex mappings below cannot
+            # express, such as splitting a fused projection. Most models leave
+            # it unset.
+            transformer = self.modules["transformer"]
+            converter = transformer.config.arch_config.lora_state_dict_converter
+            if converter is not None:
+                lora_state_dict = converter(lora_state_dict, transformer)
+
             # Map the hf layer names to our custom layer names
             param_names_mapping_fn = get_param_names_mapping(self.modules["transformer"].param_names_mapping)
             lora_param_names_mapping_fn = get_param_names_mapping(self.modules["transformer"].lora_param_names_mapping)
