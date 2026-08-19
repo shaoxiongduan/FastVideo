@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     FASTVIDEO_TRACE_FUNCTION: int = 0
     FASTVIDEO_ATTENTION_BACKEND: str | None = None
     FASTVIDEO_FA4: bool = False
+    FASTVIDEO_ULYSSES_A2A: str = "off"
     FASTVIDEO_WORKER_MULTIPROC_METHOD: str = "spawn"
     FASTVIDEO_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: str | None = None
@@ -216,6 +217,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (FA4's backward asserts sm90+ and its pack_gqa fails to JIT there).
     "FASTVIDEO_FA4":
     lambda: os.getenv("FASTVIDEO_FA4", "0") != "0",
+
+    # Sequence-parallel all-to-all backend.
+    # - "off"  (default): the NCCL path in DistributedAutograd.AllToAll4D
+    # - "auto": use FlashInfer's fused-transpose NVLink kernel when the group is
+    #   a verified single-node all-pairs NVLink mesh with world size 2/4/6/8,
+    #   and fall back to the NCCL path otherwise. Results are byte-identical
+    #   either way. Opt-in because the fused path JIT-compiles CUDA on first use
+    #   and pins a persistent IPC staging buffer.
+    "FASTVIDEO_ULYSSES_A2A":
+    lambda: os.getenv("FASTVIDEO_ULYSSES_A2A", "off").strip().lower(),
 
     # Use dedicated multiprocess context for workers.
     "FASTVIDEO_WORKER_MULTIPROC_METHOD":
