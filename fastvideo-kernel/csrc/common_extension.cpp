@@ -22,6 +22,9 @@ extern std::vector<torch::Tensor> block_sparse_attention_backward(
 );
 #endif
 
+// Ulysses sequence-parallel all-to-all (csrc/comm/)
+void register_ulysses_a2a(pybind11::module_ &);
+
 // TurboDiffusion kernels
 void register_quant(pybind11::module_ &);
 void register_rms_norm(pybind11::module_ &);
@@ -30,6 +33,8 @@ void register_gemm(pybind11::module_ &);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "FastVideo CUDA Kernels";
+
+    register_ulysses_a2a(m);
 
 #ifdef TK_COMPILE_ST_ATTN
     m.def("sta_fwd", torch::wrap_pybind_function(sta_forward), "sliding tile attention (Hopper)");
