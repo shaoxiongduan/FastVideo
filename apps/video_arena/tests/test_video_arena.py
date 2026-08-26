@@ -114,35 +114,52 @@ def test_vote_is_recorded_with_the_real_model_identities(manifest: Path, tmp_pat
 
     state = ui.new_battle(RANDOM_PROMPT, 0)[0]
     battle = state["battle"]
-    ui.cast_vote(VOTE_LEFT, state, " alice ", " looks sharper ", "sess1", RANDOM_PROMPT, False, 0)
+    ui.cast_vote(VOTE_LEFT, state, "sess1", 0)
 
     (row, ) = store.load().to_dict("records")
     assert row["vote"] == VOTE_LEFT
     assert row["winner"] == battle.left.id
     assert (row["model_left"], row["model_right"]) == (battle.left.id, battle.right.id)
     assert row["video_left"] == str(battle.left_video)  # the real path, not the anon one
-    assert row["voter"] == "alice" and row["comment"] == "looks sharper"
+    assert row["session_id"] == "sess1"
     assert row["prompt_id"] == battle.prompt.id
     assert row["decision_ms"] >= 0
 
 
 def test_vote_without_an_active_battle_raises(manifest: Path, tmp_path: Path) -> None:
     ui = ArenaUI(Arena(manifest, anonymize_paths=False), VoteStore(tmp_path / "v.jsonl"))
-    with pytest.raises(Exception, match="No active battle"):
-        ui.cast_vote(VOTE_LEFT, {}, "", "", "s", RANDOM_PROMPT, False, 0)
+    with pytest.raises(Exception, match="No active round"):
+        ui.cast_vote(VOTE_LEFT, {}, "s", 0)
 
 
-def test_auto_advance_swaps_in_a_new_battle_and_keeps_the_reveal(manifest: Path, tmp_path: Path) -> None:
+def test_voting_reveals_both_models_and_stays_on_the_round(manifest: Path, tmp_path: Path) -> None:
     arena = Arena(manifest, anonymize_paths=False)
     ui = ArenaUI(arena, VoteStore(tmp_path / "v.jsonl"), random.Random(1))
 
     state = ui.new_battle(RANDOM_PROMPT, 0)[0]
-    voted_on = state["battle"]
-    out = ui.cast_vote(VOTE_RIGHT, state, "", "", "s", RANDOM_PROMPT, True, 0)
+    battle = state["battle"]
+    out = ui.cast_vote(VOTE_RIGHT, state, "s", 0)
 
-    assert out[0]["battle"].battle_id != voted_on.battle_id, "should have advanced"
-    assert voted_on.right.name in out[4], "reveal must describe the battle just voted on"
+    assert out[0]["battle"].battle_id == battle.battle_id, "vote must not advance on its own"
+    reveal = out[4]
+    assert battle.left.name in reveal and battle.right.name in reveal, "both identities revealed"
+    assert battle.right.name in reveal.split("\n")[0], "winner named first"
+    # Vote buttons go dead, "next round" wakes up.
+    assert all(u.get("interactive") is False for u in out[5:9])
+    assert out[9].get("interactive") is True
     assert out[11] == 1, "rated counter increments"
+
+
+def test_next_round_re_enables_voting_and_clears_the_reveal(manifest: Path, tmp_path: Path) -> None:
+    ui = ArenaUI(Arena(manifest, anonymize_paths=False), VoteStore(tmp_path / "v.jsonl"), random.Random(1))
+    state = ui.new_battle(RANDOM_PROMPT, 0)[0]
+    ui.cast_vote(VOTE_RIGHT, state, "s", 0)
+
+    out = ui.new_battle(RANDOM_PROMPT, 1)  # what the "next round" button triggers
+    assert out[0]["battle"].battle_id != state["battle"].battle_id
+    assert out[4] == "", "reveal is cleared"
+    assert all(u.get("interactive") is True for u in out[5:9])
+    assert out[9].get("interactive") is False
 
 
 def test_leaderboard_recovers_the_stronger_model(manifest: Path, tmp_path: Path) -> None:
@@ -158,7 +175,7 @@ def test_leaderboard_recovers_the_stronger_model(manifest: Path, tmp_path: Path)
             vote = VOTE_LEFT if b.left.id == winner else VOTE_RIGHT
         else:
             vote = VOTE_TIE
-        ui.cast_vote(vote, state, "", "", "s", RANDOM_PROMPT, False, 0)
+        ui.cast_vote(vote, state, "s", 0)
 
     lb = store.leaderboard({m.id: m.name for m in arena.models})
     assert lb.iloc[0]["model"] == winner

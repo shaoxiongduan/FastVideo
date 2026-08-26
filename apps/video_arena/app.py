@@ -29,12 +29,6 @@ logger = logging.getLogger(__name__)
 
 RANDOM_PROMPT = "🎲 Random prompt"
 
-CSS = """
-.arena-video video { background: #000; border-radius: 8px; }
-#vote-row button { min-height: 56px; font-size: 1.05rem; }
-.reveal-box { border-left: 4px solid #f59e0b; padding-left: 12px; }
-"""
-
 
 def _prompt_md(battle: Battle) -> str:
     return f"### Prompt `{battle.prompt.id}`\n\n{battle.prompt.text}"
@@ -47,19 +41,15 @@ def _reveal_md(battle: Battle, vote: str) -> str:
         VOTE_TIE: "**Tie** — both good",
         VOTE_BOTH_BAD: "**Both bad**",
     }[vote]
-    return ("<div class='reveal-box'>\n\n"
-            f"{verdict}\n\n"
-            f"- 🅰 left = {battle.left.display}\n"
-            f"- 🅱 right = {battle.right.display}\n\n"
-            "</div>")
+    return f"{verdict}\n\n- A = {battle.left.display}\n- B = {battle.right.display}"
 
 
 class ArenaUI:
     """Event handlers for the arena tab, kept out of ``build_demo`` so they are testable.
 
     ``new_battle`` returns a flat tuple lined up with ``battle_outputs`` in
-    ``build_demo``; ``cast_vote`` returns that same tuple plus three extra outputs
-    (rated counter, cleared comment box, refreshed leaderboard).
+    ``build_demo``; ``cast_vote`` returns that same tuple plus two extra outputs
+    (rated counter, refreshed leaderboard).
     """
 
     def __init__(self, arena: Arena, store: VoteStore, rng: random.Random | None = None) -> None:
@@ -82,25 +72,23 @@ class ArenaUI:
             gr.update(value=str(battle.left_serve)),
             gr.update(value=str(battle.right_serve)),
             _prompt_md(battle),
-            "",  # clear the reveal from the previous battle
+            "",  # clear the reveal from the previous round
             gr.update(interactive=True),
             gr.update(interactive=True),
             gr.update(interactive=True),
             gr.update(interactive=True),
-            gr.update(interactive=False),  # "next" only becomes live after a vote
-            f"Rated **{n_rated}** battles this session.",
+            gr.update(interactive=False),  # "next round" only becomes live after a vote
+            f"Rated **{n_rated}** rounds this session.",
         )
 
-    def cast_vote(self, vote: str, state, voter: str, comment: str, session_id: str, prompt_label: str,
-                  auto_advance: bool, n_rated: int) -> tuple[Any, ...]:
+    def cast_vote(self, vote: str, state: dict, session_id: str, n_rated: int) -> tuple[Any, ...]:
         if not state or "battle" not in state:
-            raise gr.Error("No active battle — click 'New battle' first.")
+            raise gr.Error("No active round — pick a prompt to start one.")
         battle: Battle = state["battle"]
 
         self.store.record(
             arena=self.arena.name,
             session_id=session_id,
-            voter=(voter or "").strip() or "anonymous",
             battle_id=battle.battle_id,
             prompt_id=battle.prompt.id,
             prompt_text=battle.prompt.text,
@@ -111,30 +99,23 @@ class ArenaUI:
             vote=vote,
             winner=battle.left.id if vote == VOTE_LEFT else battle.right.id if vote == VOTE_RIGHT else None,
             decision_ms=int((time.time() - state["t0"]) * 1000),
-            comment=(comment or "").strip(),
         )
         n_rated += 1
-        reveal = _reveal_md(battle, vote)
 
-        if auto_advance:
-            nxt = self.new_battle(prompt_label, n_rated)
-            # Move on to a fresh pair, but keep the reveal for the battle just voted on.
-            return (*nxt[:4], reveal, *nxt[5:], n_rated, "", self.leaderboard())
-
+        # Stay on this round with the identities revealed; "next round" advances.
         return (
             state,
             gr.update(),
             gr.update(),
             gr.update(),
-            reveal,
+            _reveal_md(battle, vote),
             gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=True),
-            f"Rated **{n_rated}** battles this session.",
+            f"Rated **{n_rated}** rounds this session.",
             n_rated,
-            "",  # clear the comment box
             self.leaderboard(),
         )
 
@@ -142,60 +123,41 @@ class ArenaUI:
 def build_demo(arena: Arena, store: VoteStore, rng: random.Random | None = None) -> gr.Blocks:
     ui = ArenaUI(arena, store, rng)
 
-    with gr.Blocks(title=arena.name, css=CSS, theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title=arena.name) as demo:
         session_id = gr.State(lambda: uuid.uuid4().hex[:16])
         battle_state = gr.State({})
         n_rated = gr.State(0)
 
-        gr.Markdown(f"# 🥊 {arena.name}\n"
+        gr.Markdown(f"# {arena.name}\n"
                     "Two checkpoints, same prompt, names hidden until you vote.")
 
         with gr.Tabs():
             with gr.Tab("Arena"):
-                with gr.Row():
-                    prompt_dd = gr.Dropdown(choices=[RANDOM_PROMPT] + arena.prompt_choices(),
-                                            value=RANDOM_PROMPT,
-                                            label="Prompt",
-                                            scale=6)
-                    voter_tb = gr.Textbox(label="Your name (optional)", placeholder="anonymous", scale=2)
-                    new_btn = gr.Button("🔀 New battle", variant="secondary", scale=1)
-
+                prompt_dd = gr.Dropdown(choices=[RANDOM_PROMPT] + arena.prompt_choices(),
+                                        value=RANDOM_PROMPT,
+                                        label="Prompt")
                 prompt_md = gr.Markdown()
 
                 with gr.Row():
-                    vid_a = gr.Video(label="🅰  Model A",
-                                     autoplay=True,
-                                     loop=True,
-                                     show_download_button=False,
-                                     elem_classes="arena-video")
-                    vid_b = gr.Video(label="🅱  Model B",
-                                     autoplay=True,
-                                     loop=True,
-                                     show_download_button=False,
-                                     elem_classes="arena-video")
-
-                with gr.Row(elem_id="vote-row"):
-                    btn_a = gr.Button("👈  A is better", variant="primary")
-                    btn_b = gr.Button("👉  B is better", variant="primary")
-                    btn_tie = gr.Button("🤝  Tie — both good")
-                    btn_bad = gr.Button("👎  Both are bad")
+                    vid_a = gr.Video(label="A", autoplay=True, loop=True, show_download_button=False)
+                    vid_b = gr.Video(label="B", autoplay=True, loop=True, show_download_button=False)
 
                 with gr.Row():
-                    comment_tb = gr.Textbox(label="Comment (optional)",
-                                            placeholder="e.g. B has better motion but flickers at the end",
-                                            scale=5)
-                    auto_cb = gr.Checkbox(value=True, label="Auto-advance after vote", scale=1)
+                    btn_a = gr.Button("A is better", variant="primary")
+                    btn_b = gr.Button("B is better", variant="primary")
+                    btn_tie = gr.Button("Both good")
+                    btn_bad = gr.Button("Both bad")
 
                 reveal_md = gr.Markdown()
-                next_btn = gr.Button("▶️  Next battle", interactive=False)
-                progress_md = gr.Markdown("Rated **0** battles this session.")
+                next_btn = gr.Button("Next round", interactive=False)
+                progress_md = gr.Markdown("Rated **0** rounds this session.")
 
             with gr.Tab("Leaderboard"):
-                gr.Markdown("Elo starts at 1000 (K=32); ties and *both bad* both score 0.5 but are "
+                gr.Markdown("Elo starts at 1000 (K=32); *both good* and *both bad* both score 0.5 but are "
                             "counted in separate columns. `win_rate` uses decisive votes only.")
                 lb_df = gr.Dataframe(value=ui.leaderboard, label="Leaderboard", interactive=False, wrap=True)
                 pw_df = gr.Dataframe(value=store.pairwise, label="Head-to-head", interactive=False, wrap=True)
-                refresh_btn = gr.Button("🔄 Refresh")
+                refresh_btn = gr.Button("Refresh")
                 refresh_btn.click(lambda: (ui.leaderboard(), store.pairwise()), outputs=[lb_df, pw_df])
 
             with gr.Tab("Votes"):
@@ -205,8 +167,8 @@ def build_demo(arena: Arena, store: VoteStore, rng: random.Random | None = None)
                                         interactive=False,
                                         wrap=True)
                 with gr.Row():
-                    votes_refresh = gr.Button("🔄 Refresh")
-                    export_btn = gr.Button("⬇️ Export CSV")
+                    votes_refresh = gr.Button("Refresh")
+                    export_btn = gr.Button("Export CSV")
                 export_file = gr.File(label="Exported CSV", interactive=False)
                 votes_refresh.click(lambda: store.load().tail(200), outputs=votes_df)
                 export_btn.click(lambda: str(store.export_csv(store.path.with_suffix(".csv"))), outputs=export_file)
@@ -219,13 +181,13 @@ def build_demo(arena: Arena, store: VoteStore, rng: random.Random | None = None)
         battle_outputs = [
             battle_state, vid_a, vid_b, prompt_md, reveal_md, btn_a, btn_b, btn_tie, btn_bad, next_btn, progress_md
         ]
-        vote_outputs = battle_outputs + [n_rated, comment_tb, lb_df]
-        vote_inputs = [battle_state, voter_tb, comment_tb, session_id, prompt_dd, auto_cb, n_rated]
+        vote_outputs = battle_outputs + [n_rated, lb_df]
+        vote_inputs = [battle_state, session_id, n_rated]
 
         for btn, vote in ((btn_a, VOTE_LEFT), (btn_b, VOTE_RIGHT), (btn_tie, VOTE_TIE), (btn_bad, VOTE_BOTH_BAD)):
             btn.click(lambda *a, _v=vote: ui.cast_vote(_v, *a), inputs=vote_inputs, outputs=vote_outputs)
 
-        gr.on(triggers=[new_btn.click, next_btn.click, prompt_dd.change, demo.load],
+        gr.on(triggers=[next_btn.click, prompt_dd.change, demo.load],
               fn=ui.new_battle,
               inputs=[prompt_dd, n_rated],
               outputs=battle_outputs)

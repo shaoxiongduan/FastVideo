@@ -11,22 +11,25 @@ JSONL log for offline analysis.
 ```
   Arena | Leaderboard | Votes | Setup
   ------------------------------------------------------------------
-   Prompt [ 🎲 Random prompt        v ]  Your name [___]  [🔀 New battle]
+   Prompt [ 🎲 Random prompt                                     v ]
 
    ### Prompt p003
    A paper boat drifting down a rain-soaked gutter, macro shot
 
-   ┌──────── 🅰  Model A ────────┐  ┌──────── 🅱  Model B ────────┐
+   ┌──────────── A ─────────────┐  ┌──────────── B ─────────────┐
    │                            │  │                            │
    └────────────────────────────┘  └────────────────────────────┘
 
-   [ 👈 A is better ] [ 👉 B is better ] [ 🤝 Tie ] [ 👎 Both are bad ]
+   [ A is better ] [ B is better ] [ Both good ] [ Both bad ]
 
-   Comment [______________________________]   [x] Auto-advance
+   A wins — H3 @ 4k steps (h3-ckpt-4000)       <- appears after voting
+    A = H3 @ 4k steps   B = H3 @ 1k steps
 
-   ▎A wins — H3 @ 4k steps (h3-ckpt-4000)      <- appears after voting
-   ▎ 🅰 left = H3 @ 4k steps   🅱 right = H3 @ 1k steps
+   [ Next round ]
 ```
+
+Voting reveals both identities and disables the vote buttons; **Next round** draws
+the next pair. Changing the prompt also starts a new round.
 
 ## Quick start (mock data, no GPU)
 
@@ -94,8 +97,8 @@ showing the coverage), so a partially-finished sampling run still works.
 
 ## Anonymization
 
-- The rater sees only "Model A" / "Model B"; identities appear after the vote.
-- Which model is A vs B is re-randomized every battle, so position carries no signal.
+- The rater sees only "A" / "B"; both identities appear after the vote.
+- Which model is A vs B is re-randomized every round, so position carries no signal.
 - By default videos are served through per-battle symlinks with opaque names
   (`<battle_id>_L.mp4`) in a temp dir, so the checkpoint name is not visible in the
   video URL either. `--no-anon-paths` disables this and serves the real paths.
@@ -111,12 +114,15 @@ difference), anonymization can't fix that — normalize the videos first.
 One JSON object per line, appended and `fsync`ed:
 
 ```json
-{"ts": "2026-08-26T06:59:00+00:00", "arena": "...", "session_id": "a1b2...", "voter": "alice",
+{"ts": "2026-08-26T06:59:00+00:00", "arena": "...", "session_id": "a1b2...",
  "battle_id": "3f9c...", "prompt_id": "p003", "prompt_text": "...",
  "model_left": "h3-ckpt-1000", "model_right": "h3-ckpt-4000",
  "video_left": "/abs/.../p003.mp4", "video_right": "/abs/.../p003.mp4",
- "vote": "right", "winner": "h3-ckpt-4000", "decision_ms": 4821, "comment": ""}
+ "vote": "right", "winner": "h3-ckpt-4000", "decision_ms": 4821}
 ```
+
+`session_id` is per browser session, so votes can be grouped by rater without
+collecting names.
 
 `vote` is one of `left` / `right` / `tie` / `both_bad`; `winner` is `null` for the
 last two. Analyze it with:
