@@ -22,14 +22,13 @@ JSONL log for offline analysis.
 
    [ A is better ] [ B is better ] [ Both good ] [ Both bad ]
 
-   A wins — H3 @ 4k steps (h3-ckpt-4000)       <- appears after voting
-    A = H3 @ 4k steps   B = H3 @ 1k steps
-
    [ Next round ]
 ```
 
-Voting reveals both identities and disables the vote buttons; **Next round** draws
-the next pair. Changing the prompt also starts a new round.
+Voting replaces the "A" / "B" player labels with the checkpoint each video came from
+and disables the vote buttons; **Next round** draws the next pair and re-hides the
+names. Picking a specific prompt starts a round on it right away, and **Next round**
+then returns the selector to random — so pinning a prompt is a one-off, not a mode.
 
 ## Quick start (mock data, no GPU)
 
@@ -97,7 +96,7 @@ showing the coverage), so a partially-finished sampling run still works.
 
 ## Anonymization
 
-- The rater sees only "A" / "B"; both identities appear after the vote.
+- The rater sees only "A" / "B"; the player labels become the checkpoint names after the vote.
 - Which model is A vs B is re-randomized every round, so position carries no signal.
 - By default videos are served through per-battle symlinks with opaque names
   (`<battle_id>_L.mp4`) in a temp dir, so the checkpoint name is not visible in the

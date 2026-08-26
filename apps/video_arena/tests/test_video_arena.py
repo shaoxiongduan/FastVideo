@@ -132,34 +132,50 @@ def test_vote_without_an_active_battle_raises(manifest: Path, tmp_path: Path) ->
         ui.cast_vote(VOTE_LEFT, {}, "s", 0)
 
 
-def test_voting_reveals_both_models_and_stays_on_the_round(manifest: Path, tmp_path: Path) -> None:
+def test_players_are_anonymous_until_a_vote_then_carry_the_model_name(manifest: Path, tmp_path: Path) -> None:
     arena = Arena(manifest, anonymize_paths=False)
     ui = ArenaUI(arena, VoteStore(tmp_path / "v.jsonl"), random.Random(1))
 
-    state = ui.new_battle(RANDOM_PROMPT, 0)[0]
+    started = ui.new_battle(RANDOM_PROMPT, 0)
+    state = started[0]
     battle = state["battle"]
+    assert (started[1]["label"], started[2]["label"]) == ("A", "B"), "identities hidden before voting"
+
     out = ui.cast_vote(VOTE_RIGHT, state, "s", 0)
-
     assert out[0]["battle"].battle_id == battle.battle_id, "vote must not advance on its own"
-    reveal = out[4]
-    assert battle.left.name in reveal and battle.right.name in reveal, "both identities revealed"
-    assert battle.right.name in reveal.split("\n")[0], "winner named first"
+    assert out[1]["label"] == battle.left.display, "left player relabelled with its checkpoint"
+    assert out[2]["label"] == battle.right.display
+    assert "value" not in out[1], "relabelling must not reload the video"
     # Vote buttons go dead, "next round" wakes up.
-    assert all(u.get("interactive") is False for u in out[5:9])
-    assert out[9].get("interactive") is True
-    assert out[11] == 1, "rated counter increments"
+    assert all(u.get("interactive") is False for u in out[4:8])
+    assert out[8].get("interactive") is True
+    assert out[10] == 1, "rated counter increments"
 
 
-def test_next_round_re_enables_voting_and_clears_the_reveal(manifest: Path, tmp_path: Path) -> None:
+def test_next_round_re_anonymizes_and_re_enables_voting(manifest: Path, tmp_path: Path) -> None:
     ui = ArenaUI(Arena(manifest, anonymize_paths=False), VoteStore(tmp_path / "v.jsonl"), random.Random(1))
     state = ui.new_battle(RANDOM_PROMPT, 0)[0]
     ui.cast_vote(VOTE_RIGHT, state, "s", 0)
 
-    out = ui.new_battle(RANDOM_PROMPT, 1)  # what the "next round" button triggers
+    out = ui.next_round(1)
     assert out[0]["battle"].battle_id != state["battle"].battle_id
-    assert out[4] == "", "reveal is cleared"
-    assert all(u.get("interactive") is True for u in out[5:9])
-    assert out[9].get("interactive") is False
+    assert (out[1]["label"], out[2]["label"]) == ("A", "B"), "labels hidden again"
+    assert all(u.get("interactive") is True for u in out[4:8])
+    assert out[8].get("interactive") is False
+
+
+def test_next_round_returns_the_prompt_selector_to_random(manifest: Path, tmp_path: Path) -> None:
+    arena = Arena(manifest, anonymize_paths=False)
+    ui = ArenaUI(arena, VoteStore(tmp_path / "v.jsonl"), random.Random(3))
+
+    pinned = next(p.label for p in arena.prompts if p.id == "p002")
+    assert ui.new_battle(pinned, 0)[0]["battle"].prompt.id == "p002"
+
+    out = ui.next_round(1)
+    assert out[-1]["value"] == RANDOM_PROMPT, "dropdown resets so the next round is random"
+    # Over many rounds the pinned prompt must not dominate.
+    seen = {ui.next_round(0)[0]["battle"].prompt.id for _ in range(60)}
+    assert len(seen) > 1
 
 
 def test_leaderboard_recovers_the_stronger_model(manifest: Path, tmp_path: Path) -> None:

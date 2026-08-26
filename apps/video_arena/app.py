@@ -34,22 +34,12 @@ def _prompt_md(battle: Battle) -> str:
     return f"### Prompt `{battle.prompt.id}`\n\n{battle.prompt.text}"
 
 
-def _reveal_md(battle: Battle, vote: str) -> str:
-    verdict = {
-        VOTE_LEFT: f"**A wins** — {battle.left.display}",
-        VOTE_RIGHT: f"**B wins** — {battle.right.display}",
-        VOTE_TIE: "**Tie** — both good",
-        VOTE_BOTH_BAD: "**Both bad**",
-    }[vote]
-    return f"{verdict}\n\n- A = {battle.left.display}\n- B = {battle.right.display}"
-
-
 class ArenaUI:
     """Event handlers for the arena tab, kept out of ``build_demo`` so they are testable.
 
     ``new_battle`` returns a flat tuple lined up with ``battle_outputs`` in
-    ``build_demo``; ``cast_vote`` returns that same tuple plus two extra outputs
-    (rated counter, refreshed leaderboard).
+    ``build_demo``. ``cast_vote`` returns that same tuple plus two extra outputs (rated
+    counter, refreshed leaderboard); ``next_round`` appends the prompt-dropdown reset.
     """
 
     def __init__(self, arena: Arena, store: VoteStore, rng: random.Random | None = None) -> None:
@@ -69,10 +59,9 @@ class ArenaUI:
                 "battle": battle,
                 "t0": time.time()
             },
-            gr.update(value=str(battle.left_serve)),
-            gr.update(value=str(battle.right_serve)),
+            gr.update(value=str(battle.left_serve), label="A"),  # anonymous again
+            gr.update(value=str(battle.right_serve), label="B"),
             _prompt_md(battle),
-            "",  # clear the reveal from the previous round
             gr.update(interactive=True),
             gr.update(interactive=True),
             gr.update(interactive=True),
@@ -80,6 +69,10 @@ class ArenaUI:
             gr.update(interactive=False),  # "next round" only becomes live after a vote
             f"Rated **{n_rated}** rounds this session.",
         )
+
+    def next_round(self, n_rated: int) -> tuple[Any, ...]:
+        """The "next round" button always goes back to a randomly chosen prompt."""
+        return (*self.new_battle(RANDOM_PROMPT, n_rated), gr.update(value=RANDOM_PROMPT))
 
     def cast_vote(self, vote: str, state: dict, session_id: str, n_rated: int) -> tuple[Any, ...]:
         if not state or "battle" not in state:
@@ -102,13 +95,13 @@ class ArenaUI:
         )
         n_rated += 1
 
-        # Stay on this round with the identities revealed; "next round" advances.
+        # Stay on this round, but relabel each player with the checkpoint it came from;
+        # "next round" is what advances.
         return (
             state,
+            gr.update(label=battle.left.display),
+            gr.update(label=battle.right.display),
             gr.update(),
-            gr.update(),
-            gr.update(),
-            _reveal_md(battle, vote),
             gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
@@ -148,7 +141,6 @@ def build_demo(arena: Arena, store: VoteStore, rng: random.Random | None = None)
                     btn_tie = gr.Button("Both good")
                     btn_bad = gr.Button("Both bad")
 
-                reveal_md = gr.Markdown()
                 next_btn = gr.Button("Next round", interactive=False)
                 progress_md = gr.Markdown("Rated **0** rounds this session.")
 
@@ -178,19 +170,21 @@ def build_demo(arena: Arena, store: VoteStore, rng: random.Random | None = None)
                 gr.Markdown(f"\nManifest: `{arena.manifest_path}`\n\n"
                             f"Anonymized video paths: `{arena.anonymize_paths}`")
 
-        battle_outputs = [
-            battle_state, vid_a, vid_b, prompt_md, reveal_md, btn_a, btn_b, btn_tie, btn_bad, next_btn, progress_md
-        ]
-        vote_outputs = battle_outputs + [n_rated, lb_df]
+        battle_outputs = [battle_state, vid_a, vid_b, prompt_md, btn_a, btn_b, btn_tie, btn_bad, next_btn, progress_md]
         vote_inputs = [battle_state, session_id, n_rated]
 
         for btn, vote in ((btn_a, VOTE_LEFT), (btn_b, VOTE_RIGHT), (btn_tie, VOTE_TIE), (btn_bad, VOTE_BOTH_BAD)):
-            btn.click(lambda *a, _v=vote: ui.cast_vote(_v, *a), inputs=vote_inputs, outputs=vote_outputs)
+            btn.click(lambda *a, _v=vote: ui.cast_vote(_v, *a),
+                      inputs=vote_inputs,
+                      outputs=battle_outputs + [n_rated, lb_df])
 
-        gr.on(triggers=[next_btn.click, prompt_dd.change, demo.load],
+        # `.input` (not `.change`) so that next_round resetting the dropdown below does
+        # not itself count as picking a prompt and draw a second battle.
+        gr.on(triggers=[prompt_dd.input, demo.load],
               fn=ui.new_battle,
               inputs=[prompt_dd, n_rated],
               outputs=battle_outputs)
+        next_btn.click(ui.next_round, inputs=[n_rated], outputs=battle_outputs + [prompt_dd])
 
     return demo
 

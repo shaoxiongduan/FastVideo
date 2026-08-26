@@ -37,7 +37,12 @@ class ModelEntry:
 
     @property
     def display(self) -> str:
-        return f"{self.name} (`{self.id}`)" if self.name != self.id else f"`{self.id}`"
+        """Plain-text label (safe in both markdown and component labels).
+
+        The id is appended only when the name doesn't already carry it, so a name like
+        "MiniMax H3 — h3-ckpt-4000" isn't rendered as "... (h3-ckpt-4000)" twice.
+        """
+        return self.name if self.id in self.name else f"{self.name} ({self.id})"
 
 
 @dataclass
