@@ -1,0 +1,5 @@
+# Generated placeholder data and collected votes — regenerate/collect, don't commit.
+mock/
+votes/
+*.jsonl
+*.csv
