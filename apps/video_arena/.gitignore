@@ -1,5 +1,7 @@
-# Generated placeholder data and collected votes — regenerate/collect, don't commit.
+# Generated placeholder data, imported arena manifests, and collected votes.
+# Regenerate manifests with `python -m apps.video_arena.import_bundle`.
 mock/
+arenas/
 votes/
 *.jsonl
 *.csv

@@ -30,8 +30,10 @@ logger = logging.getLogger(__name__)
 RANDOM_PROMPT = "🎲 Random prompt"
 
 
-def _prompt_md(battle: Battle) -> str:
-    return f"### Prompt `{battle.prompt.id}`\n\n{battle.prompt.text}"
+def _prompt_update(battle: Battle) -> dict:
+    """Prompt goes in a fixed-height read-only box: real prompts run to a few thousand chars,
+    and rendering them inline pushes the videos below the fold."""
+    return gr.update(value=battle.prompt.text, label=f"Prompt — {battle.prompt.id}")
 
 
 class ArenaUI:
@@ -61,7 +63,7 @@ class ArenaUI:
             },
             gr.update(value=str(battle.left_serve), label="A"),  # anonymous again
             gr.update(value=str(battle.right_serve), label="B"),
-            _prompt_md(battle),
+            _prompt_update(battle),
             gr.update(interactive=True),
             gr.update(interactive=True),
             gr.update(interactive=True),
@@ -112,7 +114,11 @@ class ArenaUI:
         )
 
 
-def build_demo(arena: Arena, store: VoteStore, rng: random.Random | None = None) -> gr.Blocks:
+def build_demo(arena: Arena,
+               store: VoteStore,
+               rng: random.Random | None = None,
+               autoplay: bool = False,
+               video_height: int = 460) -> gr.Blocks:
     ui = ArenaUI(arena, store, rng)
 
     with gr.Blocks(title=arena.name) as demo:
@@ -128,11 +134,21 @@ def build_demo(arena: Arena, store: VoteStore, rng: random.Random | None = None)
                 prompt_dd = gr.Dropdown(choices=[RANDOM_PROMPT] + arena.prompt_choices(),
                                         value=RANDOM_PROMPT,
                                         label="Prompt")
-                prompt_md = gr.Markdown()
+                prompt_md = gr.Textbox(label="Prompt", lines=6, max_lines=6, interactive=False, show_copy_button=True)
 
+                # autoplay defaults off: these clips carry audio, and two players starting at
+                # once talk over each other. Pass --autoplay for silent visual-only comparison.
                 with gr.Row():
-                    vid_a = gr.Video(label="A", autoplay=True, loop=True, show_download_button=False)
-                    vid_b = gr.Video(label="B", autoplay=True, loop=True, show_download_button=False)
+                    vid_a = gr.Video(label="A",
+                                     autoplay=autoplay,
+                                     loop=True,
+                                     show_download_button=False,
+                                     height=video_height)
+                    vid_b = gr.Video(label="B",
+                                     autoplay=autoplay,
+                                     loop=True,
+                                     show_download_button=False,
+                                     height=video_height)
 
                 with gr.Row():
                     btn_a = gr.Button("A is better", variant="primary")
@@ -201,6 +217,10 @@ def main() -> None:
     p.add_argument("--port", type=int, default=7860)
     p.add_argument("--share", action="store_true", help="create a public gradio.live tunnel")
     p.add_argument("--seed", type=int, default=None, help="seed the battle sampler (reproducible ordering)")
+    p.add_argument("--autoplay",
+                   action="store_true",
+                   help="start both players automatically; leave off so their audio tracks don't overlap")
+    p.add_argument("--video-height", type=int, default=460, help="max player height in px")
     p.add_argument("--no-anon-paths",
                    action="store_true",
                    help="serve videos from their real paths (model name becomes visible in the video URL)")
@@ -212,7 +232,11 @@ def main() -> None:
     logger.info("%s", arena.coverage().replace("**", ""))
     logger.info("votes -> %s", store.path)
 
-    demo = build_demo(arena, store, rng=random.Random(args.seed) if args.seed is not None else None)
+    demo = build_demo(arena,
+                      store,
+                      rng=random.Random(args.seed) if args.seed is not None else None,
+                      autoplay=args.autoplay,
+                      video_height=args.video_height)
     demo.launch(server_name=args.host,
                 server_port=args.port,
                 share=args.share,

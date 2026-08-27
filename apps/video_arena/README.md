@@ -47,6 +47,27 @@ On a compute node, forward the port instead of using `--share`:
 ssh -N -L 7860:localhost:7860 <user>@<node>
 ```
 
+## Importing a published voting bundle
+
+If your videos come from a `h3-validation-voting-ready-v1` bundle (`manifest.jsonl` +
+`arms.json` + `arms/<slug>/videos/`), the manifest is generated for you:
+
+```bash
+python -m apps.video_arena.import_bundle \
+  --bundle /mnt/lustre/vlm-shared/h3_fasth3_validation_voting/fast_h3_v1_family_heldout60 \
+  --out apps/video_arena/arenas/fasth3_v1_family.json \
+  --name "FastH3 v1-family (held-out 60)"
+
+python -m apps.video_arena --manifest apps/video_arena/arenas/fasth3_v1_family.json \
+  --votes apps/video_arena/votes/fasth3_v1_family.jsonl
+```
+
+Arms are discovered from the `arms/` directory listing, not read out of `arms.json`, so
+**adding a checkpoint is: drop `arms/<new-slug>/videos/*.mp4` in and re-run the import.**
+An arm missing from `arms.json` still works — it just gets its slug as its display name.
+An arm that has only rendered some of the prompts is fine too: it is simply never paired
+on a prompt it hasn't rendered.
+
 ## Using real checkpoints
 
 Put one folder of videos per checkpoint, with **matching filenames across folders** —
