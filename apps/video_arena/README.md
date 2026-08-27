@@ -136,16 +136,38 @@ Or use the built-in aggregations:
 ```python
 from apps.video_arena.storage import VoteStore
 store = VoteStore("votes/h3.jsonl")
-store.leaderboard()   # wins/losses/ties/both_bad, win_rate, Elo
+store.leaderboard()   # wins/losses/ties/both_bad, win_rate, rating, ci95
+store.verdicts()      # [(model_left, model_right, vote), ...] after filtering bad rows
 store.pairwise()      # head-to-head, both orderings merged
 store.export_csv("votes/h3.csv")
 ```
 
-The **Leaderboard** tab shows both tables live. Elo starts at 1000 with K=32; `tie` and
-`both_bad` both score 0.5 for Elo but are counted in separate columns, because "both
-good" and "both bad" mean very different things about a checkpoint. `win_rate` uses
-decisive votes only. With few votes Elo is noisy and order-dependent — for a writeup,
-fit Bradley–Terry on the full log instead.
+### Ratings
+
+`rating` is a **Bradley–Terry** maximum-likelihood fit, reported on the Elo scale: 1000
+is the field average and 400 points is 10:1 odds, so
+
+```
+P(i beats j) = 1 / (1 + 10 ** (-(rating_i - rating_j) / 400))
+```
+
+It is fitted from the whole vote set at once, so it does **not** depend on the order
+votes arrived in. (Classic sequential Elo does: on a 14-vote log, reshuffling the same
+votes moved the gap between two checkpoints from −26 to +105 — it flipped which one was
+ahead. That is why this is a batch fit, not incremental updates.)
+
+`ci95` is the half-width of a bootstrap 95% interval. **If two rows' intervals overlap,
+you don't have enough votes to separate those checkpoints yet** — that is the number to
+look at before concluding a checkpoint is better. Each model is also given
+`BT_REGULARIZATION` virtual ties against a fixed anchor, so a checkpoint that has only
+ever won gets a large-but-finite rating instead of infinity.
+
+`tie` and `both_bad` each count half a win, but are reported in separate columns because
+"both good" and "both bad" mean very different things about a checkpoint. `win_rate`
+uses decisive votes only.
+
+The rating is recomputed from the log on demand — opening the **Leaderboard** tab or
+hitting Refresh — not on every vote, since the bootstrap takes ~0.2–2 s.
 
 ## CLI
 

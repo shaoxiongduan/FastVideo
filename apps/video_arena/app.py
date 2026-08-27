@@ -109,7 +109,6 @@ class ArenaUI:
             gr.update(interactive=True),
             f"Rated **{n_rated}** rounds this session.",
             n_rated,
-            self.leaderboard(),
         )
 
 
@@ -144,13 +143,20 @@ def build_demo(arena: Arena, store: VoteStore, rng: random.Random | None = None)
                 next_btn = gr.Button("Next round", interactive=False)
                 progress_md = gr.Markdown("Rated **0** rounds this session.")
 
-            with gr.Tab("Leaderboard"):
-                gr.Markdown("Elo starts at 1000 (K=32); *both good* and *both bad* both score 0.5 but are "
-                            "counted in separate columns. `win_rate` uses decisive votes only.")
+            with gr.Tab("Leaderboard") as lb_tab:
+                gr.Markdown("`rating` is a Bradley-Terry fit on the Elo scale (1000 = average, 400 points "
+                            "= 10:1 odds), so it does not depend on the order votes arrived in. `ci95` is a "
+                            "bootstrap 95% half-interval — **if two rows' intervals overlap, you do not yet "
+                            "have enough votes to separate those checkpoints.** *Both good* and *both bad* "
+                            "each score half a win but are counted separately; `win_rate` uses decisive "
+                            "votes only.")
                 lb_df = gr.Dataframe(value=ui.leaderboard, label="Leaderboard", interactive=False, wrap=True)
                 pw_df = gr.Dataframe(value=store.pairwise, label="Head-to-head", interactive=False, wrap=True)
                 refresh_btn = gr.Button("Refresh")
-                refresh_btn.click(lambda: (ui.leaderboard(), store.pairwise()), outputs=[lb_df, pw_df])
+                # Refit on demand, not on every vote: the bootstrap costs ~0.2-2s.
+                gr.on(triggers=[refresh_btn.click, lb_tab.select],
+                      fn=lambda: (ui.leaderboard(), store.pairwise()),
+                      outputs=[lb_df, pw_df])
 
             with gr.Tab("Votes"):
                 gr.Markdown(f"Raw votes are appended to `{store.path}`.")
@@ -174,9 +180,7 @@ def build_demo(arena: Arena, store: VoteStore, rng: random.Random | None = None)
         vote_inputs = [battle_state, session_id, n_rated]
 
         for btn, vote in ((btn_a, VOTE_LEFT), (btn_b, VOTE_RIGHT), (btn_tie, VOTE_TIE), (btn_bad, VOTE_BOTH_BAD)):
-            btn.click(lambda *a, _v=vote: ui.cast_vote(_v, *a),
-                      inputs=vote_inputs,
-                      outputs=battle_outputs + [n_rated, lb_df])
+            btn.click(lambda *a, _v=vote: ui.cast_vote(_v, *a), inputs=vote_inputs, outputs=battle_outputs + [n_rated])
 
         # `.input` (not `.change`) so that next_round resetting the dropdown below does
         # not itself count as picking a prompt and draw a second battle.

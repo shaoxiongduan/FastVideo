@@ -6,6 +6,7 @@ Run with:  pytest apps/video_arena/tests -v
 from __future__ import annotations
 
 import json
+import math
 import random
 from collections import Counter
 from pathlib import Path
@@ -15,7 +16,8 @@ import pytest
 
 from apps.video_arena.app import RANDOM_PROMPT, ArenaUI
 from apps.video_arena.arena import Arena
-from apps.video_arena.storage import VOTE_BOTH_BAD, VOTE_LEFT, VOTE_RIGHT, VOTE_TIE, VoteStore
+from apps.video_arena.storage import (VOTE_BOTH_BAD, VOTE_LEFT, VOTE_RIGHT, VOTE_TIE, VoteStore,
+                                      bradley_terry)
 
 MODELS = ["ckpt-a", "ckpt-b", "ckpt-c"]
 PROMPT_IDS = ["p001", "p002", "p003"]
@@ -193,10 +195,10 @@ def test_leaderboard_recovers_the_stronger_model(manifest: Path, tmp_path: Path)
             vote = VOTE_TIE
         ui.cast_vote(vote, state, "s", 0)
 
-    lb = store.leaderboard({m.id: m.name for m in arena.models})
+    lb = store.leaderboard({m.id: m.name for m in arena.models}, n_boot=0)
     assert lb.iloc[0]["model"] == winner
     assert lb.iloc[0]["win_rate"] == 1.0
-    assert lb.iloc[0]["elo"] > 1000 > lb.iloc[-1]["elo"]
+    assert lb.iloc[0]["rating"] > 1000 > lb.iloc[-1]["rating"]
 
     pw = store.pairwise()
     assert len(pw) == 3  # one row per unordered pair, both orderings merged
@@ -207,11 +209,13 @@ def test_ties_and_both_bad_are_counted_separately(manifest: Path, tmp_path: Path
     store = VoteStore(tmp_path / "votes.jsonl")
     for vote in (VOTE_TIE, VOTE_TIE, VOTE_BOTH_BAD):
         store.record(model_left="ckpt-a", model_right="ckpt-b", vote=vote)
-    lb = store.leaderboard().set_index("model")
+    lb = store.leaderboard(n_boot=0).set_index("model")
     assert lb.loc["ckpt-a", "ties"] == 2
     assert lb.loc["ckpt-a", "both_bad"] == 1
     assert pd.isna(lb.loc["ckpt-a", "win_rate"])  # no decisive votes -> undefined
-    assert lb.loc["ckpt-a", "elo"] == pytest.approx(1000.0)  # non-decisive votes cannot move Elo
+    # Two evenly-matched models with only draws between them must not separate.
+    assert lb.loc["ckpt-a", "rating"] == pytest.approx(1000.0)
+    assert lb.loc["ckpt-b", "rating"] == pytest.approx(1000.0)
 
 
 def test_empty_store_yields_empty_tables(tmp_path: Path) -> None:
@@ -227,3 +231,67 @@ def test_torn_final_line_is_tolerated(tmp_path: Path) -> None:
     with store.path.open("a") as f:
         f.write('{"model_left": "a", "model_r')  # simulate a crash mid-write
     assert len(store.load()) == 1
+
+
+# -- rating math -------------------------------------------------------------
+
+
+def _log(tmp_path: Path, results: list[tuple[str, str, str]]) -> VoteStore:
+    store = VoteStore(tmp_path / "votes.jsonl")
+    for left, right, vote in results:
+        store.record(model_left=left, model_right=right, vote=vote)
+    return store
+
+
+def test_rating_is_independent_of_vote_order(tmp_path: Path) -> None:
+    """The whole reason for Bradley-Terry over sequential Elo: reshuffling must not matter."""
+    rng = random.Random(5)
+    rows = [(*rng.sample(["a", "b", "c"], 2), rng.choice([VOTE_LEFT, VOTE_RIGHT, VOTE_TIE])) for _ in range(150)]
+
+    baseline = _log(tmp_path / "base", rows).leaderboard(n_boot=0).set_index("model")["rating"].to_dict()
+    for seed in range(5):
+        shuffled = rows[:]
+        random.Random(seed).shuffle(shuffled)
+        got = _log(tmp_path / f"s{seed}", shuffled).leaderboard(n_boot=0).set_index("model")["rating"].to_dict()
+        assert got == baseline, f"order changed the ratings (seed {seed})"
+
+
+def test_unregularized_two_model_fit_matches_the_closed_form(tmp_path: Path) -> None:
+    """With two models and no regularization, BT has an exact answer: p_a/p_b == wins_a/wins_b."""
+    rows = [("a", "b", VOTE_LEFT)] * 8 + [("a", "b", VOTE_RIGHT)] * 6
+    fit = bradley_terry([(a, b, 1.0 if v == VOTE_LEFT else 0.0) for a, b, v in rows], ["a", "b"], reg=0.0)
+    assert fit["a"] - fit["b"] == pytest.approx(400 * math.log10(8 / 6), abs=0.05)
+
+
+def test_regularization_pulls_an_undefeated_model_back_from_infinity(tmp_path: Path) -> None:
+    """A model that has only ever won has an infinite MLE; reg must keep it finite and sane."""
+    battles = [("a", "b", 1.0)] * 10
+    light = bradley_terry(battles, ["a", "b"], reg=0.5)
+    heavy = bradley_terry(battles, ["a", "b"], reg=5.0)
+    for fit in (light, heavy):
+        assert math.isfinite(fit["a"]) and math.isfinite(fit["b"])
+    assert light["a"] - light["b"] > heavy["a"] - heavy["b"] > 0, "more reg -> more shrinkage"
+    assert heavy["a"] - heavy["b"] < 800
+
+
+def test_rating_recovers_a_known_ordering(tmp_path: Path) -> None:
+    strengths = {"strong": 0.8, "mid": 0.5, "weak": 0.2}
+    rng = random.Random(4)
+    rows = []
+    for _ in range(900):
+        x, y = rng.sample(list(strengths), 2)
+        p_x = strengths[x] / (strengths[x] + strengths[y])
+        rows.append((x, y, VOTE_LEFT if rng.random() < p_x else VOTE_RIGHT))
+    lb = _log(tmp_path, rows).leaderboard(n_boot=0)
+    assert list(lb["model"]) == ["strong", "mid", "weak"]
+
+
+def test_confidence_interval_shrinks_as_votes_accumulate(tmp_path: Path) -> None:
+    rng = random.Random(9)
+    rows = [("a", "b", VOTE_LEFT if rng.random() < 0.65 else VOTE_RIGHT) for _ in range(400)]
+    small = _log(tmp_path / "small", rows[:25]).leaderboard(n_boot=60).set_index("model")
+    large = _log(tmp_path / "large", rows).leaderboard(n_boot=60).set_index("model")
+    assert large.loc["a", "ci95"] < small.loc["a", "ci95"], "more votes -> tighter interval"
+    # With 400 votes the 65/35 gap should clear its own error bar; with 25 it should not.
+    assert large.loc["a", "ci95"] < abs(large.loc["a", "rating"] - large.loc["b", "rating"])
+    assert small.loc["a", "ci95"] > large.loc["a", "ci95"] * 2
