@@ -22,6 +22,13 @@ import time
 from pathlib import Path
 
 from fastvideo import VideoGenerator
+from fastvideo.pipelines.basic.minimax_h3.packing import (
+    MINIMAX_H3_FPS,
+    MINIMAX_H3_FRAMES_PER_CHUNK,
+    MINIMAX_H3_LATENTS_PER_CHUNK,
+    MINIMAX_H3_MAX_DURATION,
+    align_num_frames,
+)
 from fastvideo.api import (
     EngineConfig,
     GenerationRequest,
@@ -32,6 +39,25 @@ from fastvideo.api import (
     PipelineSelection,
     SamplingConfig,
 )
+
+
+def clamp_to_supported_frames(num_frames: int) -> int:
+    """Largest H3-valid frame count no longer than the model's 15s ceiling.
+
+    H3 accepts 5-15s at 24fps and rounds frame counts UP to the next 17n+5. 18 of the 60
+    validation prompts ask for 362 frames = 15.083s, which is over the ceiling by two
+    frames, so the pipeline raises instead of generating and the whole worker dies. 345
+    (14.375s) is the largest valid count that fits -- and is exactly what the published
+    bundle arms used for those prompts, so clamping here also keeps arms comparable.
+    """
+    aligned = align_num_frames(num_frames)
+    if aligned / MINIMAX_H3_FPS <= MINIMAX_H3_MAX_DURATION:
+        return aligned
+    ceiling = int(MINIMAX_H3_MAX_DURATION * MINIMAX_H3_FPS)
+    best = MINIMAX_H3_LATENTS_PER_CHUNK
+    while best + MINIMAX_H3_FRAMES_PER_CHUNK <= ceiling:
+        best += MINIMAX_H3_FRAMES_PER_CHUNK
+    return best
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +79,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--shard", type=int, default=None, help="this worker's index, for splitting the prompt list")
     p.add_argument("--num-shards", type=int, default=None, help="total number of workers")
     p.add_argument("--skip-existing", action="store_true", help="skip prompts whose output file already exists")
+    p.add_argument("--no-clamp-duration", dest="clamp_duration", action="store_false",
+                   help="let over-long prompts raise instead of clamping to H3's 15s ceiling")
     return p.parse_args()
 
 
@@ -102,6 +130,8 @@ def main() -> None:
         frames = int(args.num_frames or gen.get("num_frames", 125))
         if args.max_frames:
             frames = min(frames, args.max_frames)
+        if args.clamp_duration:
+            frames = clamp_to_supported_frames(frames)
         case = row["case_id"]
         dst = out_dir / f"{idx:03d}_{case}.mp4"
 
