@@ -22,6 +22,45 @@ python extract_lora.py \
 
 > **Note:** The script automatically handles architectural differences (e.g., FastWan has extra `gate_compress` layers) by falling back to direct safetensors loading for both models if pipeline loading fails.
 
+## Extract MiniMax-H3 VSA Adapters
+
+MiniMax-H3 needs the streaming, multi-rank extractor because its transformer is
+33B parameters and VSA students add trained dense gates that are absent from
+the base checkpoint:
+
+```bash
+python scripts/lora_extraction/extract_minimax_h3_lora.py \
+  --base /path/to/MiniMax-H3 \
+  --base-model-id MiniMaxAI/MiniMax-H3 \
+  --base-revision 9bfb6693f2cf6de171db46d1aa586f67d773a1da \
+  --finetuned /path/to/training-output/checkpoint-1300 \
+  --finetuned-role student \
+  --finetuned-model-id FastVideo/FastVideo-FastH3-4-step-v1 \
+  --finetuned-revision b790390377918066c5f5902ec6cc96e21a55926e \
+  --output-dir /path/to/fasth3-loras \
+  --ranks 64 128 256 \
+  --device cuda:0
+```
+
+Use the fp32 DCP training checkpoint when it is available. Although the script
+also accepts the published bf16 Diffusers export, subtracting two bf16 exports
+produces a quantized shadow of the training update: most changed entries sit at
+one bf16 ULP and the apparent delta has a long, nearly full-rank tail.
+
+The largest requested rank is factorized once. Smaller ranks are prefix slices
+of the same factors, and per-layer residual estimates are recorded in the
+factorization manifest. Each `rank-<N>/adapter_model.safetensors` is a mixed
+checkpoint containing:
+
+- Diffusers-named `lora_A` and `lora_B` factors for the large transformer and
+  token-refiner block matrices;
+- exact small boundary, timestep, normalization, and bias tensors;
+- the 50 full bf16 `to_gate_compress.weight` tensors copied exactly from the
+  VSA-trained checkpoint.
+
+Do not drop or low-rank the dense gates: the base has no counterpart for them,
+and a zero/missing gate disables the trained VSA compression branch. Use
+`--resume` to reuse completed per-layer factors after an interrupted run.
 
 ## Merge Adapter
 

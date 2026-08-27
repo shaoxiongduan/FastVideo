@@ -26,6 +26,7 @@ from pathlib import Path
 from fastvideo import VideoGenerator
 from fastvideo.api import (
     CompileConfig,
+    ComponentConfig,
     EngineConfig,
     GenerationRequest,
     GeneratorConfig,
@@ -42,6 +43,7 @@ DEFAULT_MODEL = "FastVideo/FastVideo-Minimax-FastH3-Preview-v0.2"
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-path", default=DEFAULT_MODEL)
+    parser.add_argument("--lora-path", help="Optional mixed LoRA/full-VSA-gate checkpoint")
     # The HF repo may require authentication while the MiniMax H3 Community
     # License review completes. A local snapshot can be passed here instead.
     parser.add_argument("--prompt", required=True)
@@ -216,7 +218,10 @@ def build_generator_config(args: argparse.Namespace) -> GeneratorConfig:
     }
     return GeneratorConfig(
         model_path=args.model_path,
-        pipeline=PipelineSelection(experimental=experimental),
+        pipeline=PipelineSelection(
+            components=ComponentConfig(lora_path=args.lora_path),
+            experimental=experimental,
+        ),
         engine=EngineConfig(
             num_gpus=args.num_gpus,
             use_fsdp_inference=args.num_gpus > 1 and not args.replicated_dit,

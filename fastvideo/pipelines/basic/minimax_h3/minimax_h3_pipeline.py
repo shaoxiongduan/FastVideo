@@ -13,10 +13,10 @@ from fastvideo.pipelines.basic.minimax_h3.stages import (
     MiniMaxH3LatentPreparationStage,
     MiniMaxH3VideoDecodingStage,
 )
-from fastvideo.pipelines.composed_pipeline_base import ComposedPipelineBase
+from fastvideo.pipelines.lora_pipeline import LoRAPipeline
 
 
-class MiniMaxH3BasePipeline(ComposedPipelineBase):
+class MiniMaxH3BasePipeline(LoRAPipeline):
     """Shared loading and target-generation path for MiniMax H3."""
 
     pipeline_config_cls: type[MiniMaxH3PipelineConfig] = MiniMaxH3PipelineConfig

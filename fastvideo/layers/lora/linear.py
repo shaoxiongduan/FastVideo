@@ -64,6 +64,15 @@ class BaseLayerWithLoRA(nn.Module):
             self.lora_A = None
             self.lora_B = None
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """Expose the wrapped weight to models that inspect projection dtype."""
+        return self.base_layer.weight
+
+    @property
+    def bias(self) -> torch.Tensor | None:
+        return getattr(self.base_layer, "bias", None)
+
     @torch.compile()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         lora_A = self.lora_A

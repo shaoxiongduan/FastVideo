@@ -10,7 +10,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from safetensors.torch import load_file
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, distribute_tensor
 
 from fastvideo.distributed import get_local_torch_device
 from fastvideo.fastvideo_args import FastVideoArgs, TrainingArgs
@@ -293,6 +293,50 @@ class LoRAPipeline(ComposedPipelineBase):
                             converted_count += 1
             logger.info("Converted %d layers to LoRA layers", converted_count)
 
+    @staticmethod
+    @torch.no_grad()
+    def _load_full_adapter_weights(
+        transformer: nn.Module,
+        adapter_state: dict[str, torch.Tensor],
+        param_names_mapping_fn: Any,
+    ) -> int:
+        """Apply dense weights carried beside LoRA factors.
+
+        VSA-trained models can add a complete projection that has no base
+        counterpart. Such a tensor is not a low-rank delta and must remain a
+        full weight in the mixed adapter checkpoint.
+        """
+        dense_keys = [name for name in adapter_state if name.endswith((".weight", ".bias")) and ".lora_" not in name]
+        for source_name in dense_keys:
+            mapped_name = source_name.removeprefix("diffusion_model.")
+            target_name, merge_index, _ = param_names_mapping_fn(mapped_name)
+            if merge_index is not None:
+                raise ValueError(
+                    f"Dense adapter weight {source_name!r} maps to a packed parameter; this is unsupported")
+
+            module_name, parameter_name = target_name.rsplit(".", 1)
+            module = transformer.get_submodule(module_name)
+            if isinstance(module, BaseLayerWithLoRA):
+                module = module.base_layer
+            parameter = getattr(module, parameter_name, None)
+            if not isinstance(parameter, torch.Tensor):
+                raise ValueError(f"Dense adapter weight {source_name!r} has no target parameter {target_name!r}")
+            weight = adapter_state.pop(source_name)
+            if parameter.shape != weight.shape:
+                raise ValueError(f"Dense adapter weight {source_name!r} has shape {tuple(weight.shape)}, "
+                                 f"expected {tuple(parameter.shape)}")
+            if isinstance(parameter, DTensor):
+                distributed_weight = distribute_tensor(
+                    weight.to(device=parameter.to_local().device, dtype=parameter.dtype),
+                    device_mesh=parameter.device_mesh,
+                    placements=parameter.placements,
+                )
+                parameter.copy_(distributed_weight)
+            else:
+                parameter.copy_(weight.to(device=parameter.device, dtype=parameter.dtype))
+
+        return len(dense_keys)
+
     def set_lora_adapter(self,
                          lora_nickname: str,
                          lora_path: str | None = None,
@@ -317,8 +361,12 @@ class LoRAPipeline(ComposedPipelineBase):
             lora_state_dict = load_file(lora_local_path)
 
             # Map the hf layer names to our custom layer names
-            param_names_mapping_fn = get_param_names_mapping(self.modules["transformer"].param_names_mapping)
-            lora_param_names_mapping_fn = get_param_names_mapping(self.modules["transformer"].lora_param_names_mapping)
+            transformer = self.modules["transformer"]
+            param_names_mapping_fn = get_param_names_mapping(transformer.param_names_mapping)
+            lora_param_names_mapping_fn = get_param_names_mapping(transformer.lora_param_names_mapping)
+            dense_count = self._load_full_adapter_weights(transformer, lora_state_dict, param_names_mapping_fn)
+            if dense_count:
+                logger.info("Rank %d: loaded %d full adapter weights", rank, dense_count)
 
             # Extract alpha values and weights in a single pass
             to_merge_params: defaultdict[Hashable, dict[Any, Any]] = (defaultdict(dict))
