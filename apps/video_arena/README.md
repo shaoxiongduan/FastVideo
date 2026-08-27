@@ -41,11 +41,35 @@ python -m apps.video_arena --manifest apps/video_arena/mock/manifest.json
 # -> http://localhost:7860   (add --share for a public gradio.live tunnel)
 ```
 
-On a compute node, forward the port instead of using `--share`:
+## Letting other people rate
+
+Three ways to expose the app, measured on this cluster against an 11.5 MB file (the mean
+real clip size) served by the same local app:
+
+| route | page load | 11.5 MB clip | notes |
+|---|---|---|---|
+| SSH port-forward | 8 ms | 0.02 s (450 MB/s) | no third party, no cap; rater needs cluster access |
+| ngrok | 0.08 s | 0.25 s (26–50 MB/s) | needs an authtoken; plan has a monthly byte cap |
+| gradio `--share` | 1.8 s | 18 s (0.65 MB/s) | zero setup; link expires; relay is the bottleneck |
+
+`gradio --share` works here, but its relay caps around **0.65 MB/s**, so a round with two
+real clips takes about 35 s to load. Fine for a demo, painful for a rating session.
 
 ```bash
+# SSH forward — best if raters have cluster access
 ssh -N -L 7860:localhost:7860 <user>@<node>
+
+# ngrok — run alongside the app, in a second shell
+ngrok config add-authtoken <token>     # once
+ngrok http 7860
+
+# gradio's own tunnel
+python -m apps.video_arena --manifest ... --share
 ```
+
+Budget the bytes before you start: at ~11 MB a clip, **one round costs ~22 MB**, so 400
+rounds is ~9 GB. Check your ngrok plan's monthly transfer allowance against that number —
+the free tier's allowance is well under it.
 
 ## Importing a published voting bundle
 
