@@ -43,17 +43,23 @@ python -m apps.video_arena --manifest apps/video_arena/mock/manifest.json
 
 ## Letting other people rate
 
-Three ways to expose the app, measured on this cluster against an 11.5 MB file (the mean
-real clip size) served by the same local app:
+Three ways to expose the app. Numbers below are measured on this cluster by fetching the
+six real clips of three sampled rounds (45 MiB total) through each route:
 
-| route | page load | 11.5 MB clip | notes |
+| route | page load | per round (2 clips, ~15 MiB) | notes |
 |---|---|---|---|
-| SSH port-forward | 8 ms | 0.02 s (450 MB/s) | no third party, no cap; rater needs cluster access |
-| ngrok | 0.08 s | 0.25 s (26–50 MB/s) | needs an authtoken; plan has a monthly byte cap |
-| gradio `--share` | 1.8 s | 18 s (0.65 MB/s) | zero setup; link expires; relay is the bottleneck |
+| SSH port-forward | 8 ms | <0.1 s (386 MB/s) | no third party, no cap; rater needs cluster access |
+| ngrok | 0.3 s | 0.3 s (30–60 MB/s) | needs an authtoken; monthly byte cap on the plan |
+| gradio `--share` | 2.9 s | 40–65 s (0.13–0.65 MB/s) | zero setup; link expires; relay is the bottleneck |
 
-`gradio --share` works here, but its relay caps around **0.65 MB/s**, so a round with two
-real clips takes about 35 s to load. Fine for a demo, painful for a rating session.
+Neither the app nor Lustre is the constraint — the same files serve at 386 MB/s over
+plain local HTTP, and read off Lustre faster still. **`gradio --share` works but its relay
+runs at well under 1 MB/s**, which is 40–65 s of loading per round. Fine to demo, unusable
+for a rating session.
+
+One caveat on ngrok: a long-lived agent session once degraded to a flat 2.00 MB/s across
+every file size, and restarting `ngrok http` restored 30–60 MB/s. I could not account for
+it. If throughput feels wrong, restart the agent before debugging anything else.
 
 ```bash
 # SSH forward — best if raters have cluster access
@@ -67,9 +73,9 @@ ngrok http 7860
 python -m apps.video_arena --manifest ... --share
 ```
 
-Budget the bytes before you start: at ~11 MB a clip, **one round costs ~22 MB**, so 400
-rounds is ~9 GB. Check your ngrok plan's monthly transfer allowance against that number —
-the free tier's allowance is well under it.
+Budget the bytes before you start: clips average 11 MB, so **one round costs ~15–22 MB**
+and 400 rounds is 6–9 GB. Check your ngrok plan's monthly transfer allowance against that
+number before a large session.
 
 ## Importing a published voting bundle
 
