@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=1000)
     p.add_argument("--num-gpus", type=int, default=1)
     p.add_argument("--max-frames", type=int, default=None, help="cap num_frames (for quick smoke tests)")
+    p.add_argument("--num-frames", type=int, default=None,
+                   help="override num_frames for every prompt. H3 rounds UP to the next 17n+5, so 124 "
+                        "(5.17s at 24fps) is the valid value nearest 5 seconds; 125 silently becomes 141.")
+    p.add_argument("--shard", type=int, default=None, help="this worker's index, for splitting the prompt list")
+    p.add_argument("--num-shards", type=int, default=None, help="total number of workers")
+    p.add_argument("--skip-existing", action="store_true", help="skip prompts whose output file already exists")
     return p.parse_args()
 
 
@@ -56,6 +62,21 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = [json.loads(x) for x in Path(args.prompts).read_text().splitlines() if x.strip()]
+
+    indices = list(args.indices)
+    if args.num_shards is not None:
+        indices = [i for i in range(len(rows)) if i % args.num_shards == args.shard]
+    if args.skip_existing:
+        pending = []
+        for i in indices:
+            if (out_dir / f"{i:03d}_{rows[i]['case_id']}.mp4").exists():
+                print(f"[skip] {i:03d} already rendered", flush=True)
+            else:
+                pending.append(i)
+        indices = pending
+    print(f"[plan] {len(indices)} prompts on this worker: {indices}", flush=True)
+    if not indices:
+        return
 
     generator = VideoGenerator.from_config(
         GeneratorConfig(
@@ -75,10 +96,10 @@ def main() -> None:
         print(f"[lora] applied {args.lora_path} strength={args.lora_strength}", flush=True)
 
     try:
-      for idx in args.indices:
+      for idx in indices:
         row = rows[idx]
         gen = row.get("generation", {})
-        frames = int(gen.get("num_frames", 125))
+        frames = int(args.num_frames or gen.get("num_frames", 125))
         if args.max_frames:
             frames = min(frames, args.max_frames)
         case = row["case_id"]
