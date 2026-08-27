@@ -92,8 +92,28 @@ python -m apps.video_arena --manifest apps/video_arena/arenas/fasth3_v1_family.j
   --votes apps/video_arena/votes/fasth3_v1_family.jsonl
 ```
 
-Arms are discovered from the `arms/` directory listing, not read out of `arms.json`, so
-**adding a checkpoint is: drop `arms/<new-slug>/videos/*.mp4` in and re-run the import.**
+### Adding an arm from outside the bundle
+
+When the videos aren't in the bundle — a vendor's samples, a HF dataset, a scratch run —
+point at the directory directly. Filenames rarely match the bundle's `<index>_<sample_id>`
+convention, so `--external-arm-match` says how to line them up (`stem`, `sample_id`, or
+`index`); the resolved filenames are written into `prompts[].files`:
+
+```bash
+python -m apps.video_arena.import_bundle \
+  --bundle .../fast_h3_v1_family_heldout60 \
+  --out apps/video_arena/arenas/fasth3_v1_family.json \
+  --external-arm fal_h3_max=/mnt/lustre/vlm-s4duan/arena_arms/fal_h3_max/videos \
+  --external-arm-match sample_id \
+  --arm-name "fal_h3_max=fal.ai H3 Max"
+```
+
+The import prints how many prompts each arm matched, so a bad `--external-arm-match`
+shows up immediately as a low count rather than a silently short arena.
+
+Arms inside the bundle are discovered from the `arms/` directory listing, not read out of
+`arms.json`, so **adding a checkpoint there is: drop `arms/<new-slug>/videos/*.mp4` in and
+re-run the import.**
 An arm missing from `arms.json` still works — it just gets its slug as its display name.
 An arm that has only rendered some of the prompts is fine too: it is simply never paired
 on a prompt it hasn't rendered.

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 from pathlib import Path
 
 from apps.video_arena.arena import VIDEO_EXTS
@@ -79,6 +80,64 @@ def load_prompts(bundle: Path, arms: list[str]) -> list[dict]:
     return out
 
 
+def _parse_pairs(values: list[str] | None, flag: str) -> dict[str, str]:
+    out = {}
+    for v in values or []:
+        if "=" not in v:
+            raise SystemExit(f"{flag} expects SLUG=VALUE, got {v!r}")
+        slug, val = v.split("=", 1)
+        out[slug.strip()] = val.strip()
+    return out
+
+
+def match_external_arm(prompts: list[dict], video_dir: Path, how: str) -> dict[str, str]:
+    """Map prompt id -> filename for an arm whose filenames don't match the bundle's stems.
+
+    The bundle names videos ``<index>_<sample_id>.mp4``; an arm from somewhere else (a W&B
+    export, a vendor API) usually doesn't. ``how`` picks how to line them up:
+
+    ``stem``       filename stem equals the prompt id — the bundle's own convention
+    ``sample_id``  the prompt id minus its ``<index>_`` prefix equals the filename stem
+    ``index``      the prompt's leading integer equals the filename's first integer
+    """
+    files = sorted(p for p in video_dir.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS)
+    out: dict[str, str] = {}
+
+    if how == "stem":
+        by_stem = {f.stem: f.name for f in files}
+        for pr in prompts:
+            if pr["id"] in by_stem:
+                out[pr["id"]] = by_stem[pr["id"]]
+        return out
+
+    if how == "sample_id":
+        by_stem = {f.stem: f.name for f in files}
+        for pr in prompts:
+            sid = pr["id"].split("_", 1)[-1]
+            if sid in by_stem:
+                out[pr["id"]] = by_stem[sid]
+        return out
+
+    if how == "index":
+        by_index: dict[int, list[str]] = {}
+        for f in files:
+            digits = re.findall(r"\d+", f.stem)
+            if digits:
+                by_index.setdefault(int(digits[0]), []).append(f.name)
+        for pr in prompts:
+            digits = re.findall(r"\d+", pr["id"])
+            if not digits:
+                continue
+            hits = by_index.get(int(digits[0]), [])
+            if len(hits) == 1:
+                out[pr["id"]] = hits[0]
+            elif len(hits) > 1:
+                logger.warning("index %s is ambiguous in %s (%d files), skipping", digits[0], video_dir, len(hits))
+        return out
+
+    raise SystemExit(f"unknown --external-arm-match {how!r}")
+
+
 def describe(slug: str, meta: dict) -> tuple[str, str]:
     name = str(meta.get("display_name") or meta.get("model_id") or slug)
     bits = []
@@ -91,22 +150,51 @@ def describe(slug: str, meta: dict) -> tuple[str, str]:
     return name, " · ".join(bits)
 
 
-def build(bundle: Path, arms: list[str] | None, name: str | None) -> dict:
+def build(bundle: Path,
+          arms: list[str] | None,
+          name: str | None,
+          external: dict[str, str] | None = None,
+          arm_names: dict[str, str] | None = None,
+          external_match: str = "stem") -> dict:
     arms = arms or discover_arms(bundle)
-    if len(arms) < 2:
-        raise SystemExit(f"need at least 2 arms to run an arena, found {arms}")
     meta = load_arm_meta(bundle)
     prompts = load_prompts(bundle, arms)
+    arm_names = arm_names or {}
 
     models = []
     for slug in arms:
         display, notes = describe(slug, meta.get(slug, {}))
         models.append({
             "id": slug,
-            "name": display,
+            "name": arm_names.get(slug, display),
             "dir": str((bundle / "arms" / slug / "videos").resolve()),
             "notes": notes,
         })
+
+    # Arms that live outside the bundle: a vendor's samples, a HF dataset, a scratch run.
+    # Their filenames rarely match the bundle's, so each match is resolved here and written
+    # into prompts[].files, which Arena already honours as a per-model filename override.
+    for slug, raw_dir in (external or {}).items():
+        d = Path(raw_dir).expanduser().resolve()
+        if not d.is_dir():
+            raise SystemExit(f"--external-arm {slug}: {d} is not a directory")
+        mapping = match_external_arm(prompts, d, external_match)
+        if not mapping:
+            raise SystemExit(f"--external-arm {slug}: nothing in {d} matched any prompt under "
+                             f"--external-arm-match {external_match}")
+        for pr in prompts:
+            if pr["id"] in mapping:
+                pr.setdefault("files", {})[slug] = mapping[pr["id"]]
+        models.append({
+            "id": slug,
+            "name": arm_names.get(slug, slug),
+            "dir": str(d),
+            "notes": f"external arm · {len(mapping)}/{len(prompts)} prompts matched by {external_match}",
+        })
+        logger.info("external arm %s: matched %d/%d prompts by %s", slug, len(mapping), len(prompts), external_match)
+
+    if len(models) < 2:
+        raise SystemExit(f"need at least 2 arms to run an arena, found {[m['id'] for m in models]}")
 
     readme = bundle / "README.md"
     caveat = ""
@@ -130,11 +218,30 @@ def main() -> None:
     p.add_argument("--out", required=True, help="arena manifest to write")
     p.add_argument("--arms", nargs="+", default=None, help="restrict to these arm slugs (default: all found)")
     p.add_argument("--name", default=None, help="arena title shown in the UI")
+    p.add_argument("--external-arm",
+                   action="append",
+                   metavar="SLUG=DIR",
+                   default=None,
+                   help="add an arm from a directory outside the bundle; repeatable")
+    p.add_argument("--external-arm-match",
+                   choices=("stem", "sample_id", "index"),
+                   default="stem",
+                   help="how an external arm's filenames line up with the bundle's prompts")
+    p.add_argument("--arm-name",
+                   action="append",
+                   metavar="SLUG=NAME",
+                   default=None,
+                   help="override an arm's display name; repeatable")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     bundle = Path(args.bundle).expanduser().resolve()
-    manifest = build(bundle, args.arms, args.name)
+    manifest = build(bundle,
+                     args.arms,
+                     args.name,
+                     external=_parse_pairs(args.external_arm, "--external-arm"),
+                     arm_names=_parse_pairs(args.arm_name, "--arm-name"),
+                     external_match=args.external_arm_match)
 
     out = Path(args.out).expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -142,8 +249,9 @@ def main() -> None:
 
     print(f"{len(manifest['models'])} arms x {len(manifest['prompts'])} prompts -> {out}")
     for m in manifest["models"]:
-        n = sum(1 for p_ in Path(m["dir"]).iterdir() if p_.suffix.lower() in VIDEO_EXTS)
-        print(f"  {m['id']:<10} {n:>4} videos  {m['name']}")
+        n = sum(1 for pr in manifest["prompts"]
+                if pr.get("files", {}).get(m["id"]) or (Path(m["dir"]) / f"{pr['id']}.mp4").exists())
+        print(f"  {m['id']:<14} {n:>3}/{len(manifest['prompts'])} prompts  {m['name']}")
 
 
 if __name__ == "__main__":
