@@ -145,7 +145,11 @@ class LoRAPipeline(ComposedPipelineBase):
                 transformer_module,
         ) in self.trainable_transformer_modules.items():
             self.exclude_lora_layers[transformer_name] = (transformer_module.config.arch_config.exclude_lora_layers)
-        self.lora_target_modules = self.fastvideo_args.lora_target_modules
+        # Only override the pipeline class's own default when the caller actually set one;
+        # assigning unconditionally erases per-model defaults (MiniMax H3 relies on its own,
+        # because wrapping every linear breaks a DiT forward that reads `proj_in.weight`).
+        if self.fastvideo_args.lora_target_modules is not None:
+            self.lora_target_modules = self.fastvideo_args.lora_target_modules
         self.lora_path = self.fastvideo_args.lora_path
         self.lora_nickname = self.fastvideo_args.lora_nickname
         self.training_mode = self.fastvideo_args.training_mode
