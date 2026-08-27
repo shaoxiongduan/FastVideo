@@ -17,6 +17,7 @@ from fastvideo.api import (
     OffloadConfig,
     OutputConfig,
     ParallelismConfig,
+    PipelineSelection,
     SamplingConfig,
 )
 from fastvideo.pipelines.basic.minimax_h3.packing import resolve_canvas_size
@@ -40,6 +41,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-gpus", type=int, default=4)
+    parser.add_argument("--vsa", action="store_true",
+                        help="run the VSA-H3 attention backend, required by checkpoints distilled with "
+                             "block-sparse attention (FastH3 v1/v1.1/v1.2). Leave off for dense "
+                             "checkpoints such as FastH3-Dense or base MiniMax-H3.")
+    parser.add_argument("--vsa-sparsity", type=float, default=0.0,
+                        help="0.0 (default) selects every tile, making the attention math exact")
+    parser.add_argument("--vsa-tile-size", type=int, default=64,
+                        help="64 is what the FastH3 students were trained with")
     return parser.parse_args()
 
 
@@ -51,9 +60,24 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # FastH3 v1/v1.1/v1.2 were distilled with block-sparse video attention and carry trained
+    # `attn.to_gate_compress` gates, which only exist under the VSA-H3 backend. Loading one
+    # on the dense backend fails with "Parameter transformer_blocks.N.attn.to_gate_compress
+    # .weight not found in custom model state dict". Sparsity 0.0 selects every tile, so the
+    # attention math stays exact — this only changes which modules get built.
+    # Dense checkpoints (FastH3-Dense, base MiniMax-H3) must NOT set it.
+    experimental: dict[str, object] = {}
+    if args.vsa:
+        experimental = {
+            "attention_backend": "VIDEO_SPARSE_ATTN_H3",
+            "VSA_sparsity": args.vsa_sparsity,
+            "VSA_tile_size": args.vsa_tile_size,
+        }
+
     generator = VideoGenerator.from_config(
         GeneratorConfig(
             model_path=args.model_path,
+            pipeline=PipelineSelection(experimental=experimental),
             engine=EngineConfig(
                 num_gpus=args.num_gpus,
                 use_fsdp_inference=args.num_gpus > 1,
