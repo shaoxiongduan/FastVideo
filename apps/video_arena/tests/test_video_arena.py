@@ -41,7 +41,7 @@ def manifest(tmp_path: Path) -> Path:
 
 
 def test_grid_is_fully_populated(manifest: Path) -> None:
-    arena = Arena(manifest, anonymize_paths=False)
+    arena = Arena(manifest)
     assert len(arena.models) == len(MODELS)
     assert [p.id for p in arena.prompts] == PROMPT_IDS
     for pid in PROMPT_IDS:
@@ -54,7 +54,7 @@ def test_prompts_are_discovered_from_filenames_when_manifest_omits_them(manifest
     manifest.write_text(json.dumps(raw))
     (manifest.parent / "prompts.json").write_text(json.dumps({"p001": "recovered text"}))
 
-    arena = Arena(manifest, anonymize_paths=False)
+    arena = Arena(manifest)
     assert [p.id for p in arena.prompts] == PROMPT_IDS
     assert arena.prompts[0].text == "recovered text"
     assert arena.prompts[1].text == "p002"  # no sidecar entry: falls back to the id
@@ -63,7 +63,7 @@ def test_prompts_are_discovered_from_filenames_when_manifest_omits_them(manifest
 def test_prompt_without_two_videos_is_dropped(manifest: Path) -> None:
     for mid in MODELS[1:]:
         (manifest.parent / "videos" / mid / "p003.mp4").unlink()
-    arena = Arena(manifest, anonymize_paths=False)
+    arena = Arena(manifest)
     assert [p.id for p in arena.prompts] == ["p001", "p002"]
 
 
@@ -72,11 +72,11 @@ def test_arena_rejects_a_manifest_with_no_usable_prompts(manifest: Path) -> None
         for pid in PROMPT_IDS:
             (manifest.parent / "videos" / mid / f"{pid}.mp4").unlink()
     with pytest.raises(ValueError, match="no prompt has videos"):
-        Arena(manifest, anonymize_paths=False)
+        Arena(manifest)
 
 
 def test_sampling_is_balanced_and_never_self_pairs(manifest: Path) -> None:
-    arena = Arena(manifest, anonymize_paths=False)
+    arena = Arena(manifest)
     rng = random.Random(0)
     left_counts: Counter[str] = Counter()
     pair_counts: Counter[tuple[str, ...]] = Counter()
@@ -94,23 +94,23 @@ def test_sampling_is_balanced_and_never_self_pairs(manifest: Path) -> None:
 
 
 def test_prompt_selector_pins_the_prompt(manifest: Path) -> None:
-    arena = Arena(manifest, anonymize_paths=False)
+    arena = Arena(manifest)
     label = next(p.label for p in arena.prompts if p.id == "p002")
     for _ in range(20):
         assert arena.sample_battle(label, random.Random()).prompt.id == "p002"
 
 
-def test_anonymized_paths_hide_the_model_id(manifest: Path) -> None:
-    arena = Arena(manifest, anonymize_paths=True)
-    b = arena.sample_battle(None, random.Random(0))
-    for serve, real, model in ((b.left_serve, b.left_video, b.left), (b.right_serve, b.right_video, b.right)):
-        assert model.id not in str(serve), "model id leaked into the served path"
-        assert serve.resolve() == real.resolve(), "anonymized path must point at the real video"
-    assert str(arena._anon_root) in arena.serve_roots
+def test_serve_roots_cover_every_video(manifest: Path) -> None:
+    """gradio refuses to serve a file outside allowed_paths, so every arm's dir must be listed."""
+    arena = Arena(manifest)
+    roots = {Path(r) for r in arena.serve_roots}
+    for prompt in arena.prompts:
+        for path in arena.videos[prompt.id].values():
+            assert any(path.resolve().is_relative_to(r) for r in roots), path
 
 
 def test_vote_is_recorded_with_the_real_model_identities(manifest: Path, tmp_path: Path) -> None:
-    arena = Arena(manifest, anonymize_paths=True)
+    arena = Arena(manifest)
     store = VoteStore(tmp_path / "votes.jsonl")
     ui = ArenaUI(arena, store, random.Random(0))
 
@@ -122,20 +122,20 @@ def test_vote_is_recorded_with_the_real_model_identities(manifest: Path, tmp_pat
     assert row["vote"] == VOTE_LEFT
     assert row["winner"] == battle.left.id
     assert (row["model_left"], row["model_right"]) == (battle.left.id, battle.right.id)
-    assert row["video_left"] == str(battle.left_video)  # the real path, not the anon one
+    assert row["video_left"] == str(battle.left_video)
     assert row["session_id"] == "sess1"
     assert row["prompt_id"] == battle.prompt.id
     assert row["decision_ms"] >= 0
 
 
 def test_vote_without_an_active_battle_raises(manifest: Path, tmp_path: Path) -> None:
-    ui = ArenaUI(Arena(manifest, anonymize_paths=False), VoteStore(tmp_path / "v.jsonl"))
+    ui = ArenaUI(Arena(manifest), VoteStore(tmp_path / "v.jsonl"))
     with pytest.raises(Exception, match="No active round"):
         ui.cast_vote(VOTE_LEFT, {}, "s", 0)
 
 
 def test_players_are_anonymous_until_a_vote_then_carry_the_model_name(manifest: Path, tmp_path: Path) -> None:
-    arena = Arena(manifest, anonymize_paths=False)
+    arena = Arena(manifest)
     ui = ArenaUI(arena, VoteStore(tmp_path / "v.jsonl"), random.Random(1))
 
     started = ui.new_battle(RANDOM_PROMPT, 0)
@@ -155,7 +155,7 @@ def test_players_are_anonymous_until_a_vote_then_carry_the_model_name(manifest: 
 
 
 def test_next_round_re_anonymizes_and_re_enables_voting(manifest: Path, tmp_path: Path) -> None:
-    ui = ArenaUI(Arena(manifest, anonymize_paths=False), VoteStore(tmp_path / "v.jsonl"), random.Random(1))
+    ui = ArenaUI(Arena(manifest), VoteStore(tmp_path / "v.jsonl"), random.Random(1))
     state = ui.new_battle(RANDOM_PROMPT, 0)[0]
     ui.cast_vote(VOTE_RIGHT, state, "s", 0)
 
@@ -167,7 +167,7 @@ def test_next_round_re_anonymizes_and_re_enables_voting(manifest: Path, tmp_path
 
 
 def test_next_round_returns_the_prompt_selector_to_random(manifest: Path, tmp_path: Path) -> None:
-    arena = Arena(manifest, anonymize_paths=False)
+    arena = Arena(manifest)
     ui = ArenaUI(arena, VoteStore(tmp_path / "v.jsonl"), random.Random(3))
 
     pinned = next(p.label for p in arena.prompts if p.id == "p002")
@@ -181,7 +181,7 @@ def test_next_round_returns_the_prompt_selector_to_random(manifest: Path, tmp_pa
 
 
 def test_leaderboard_recovers_the_stronger_model(manifest: Path, tmp_path: Path) -> None:
-    arena = Arena(manifest, anonymize_paths=False)
+    arena = Arena(manifest)
     store = VoteStore(tmp_path / "votes.jsonl")
     ui = ArenaUI(arena, store, random.Random(7))
 

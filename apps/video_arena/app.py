@@ -21,6 +21,7 @@ from typing import Any
 
 import gradio as gr
 import pandas as pd
+from starlette.middleware import Middleware
 
 from apps.video_arena.arena import Arena, Battle
 from apps.video_arena.storage import VOTE_BOTH_BAD, VOTE_LEFT, VOTE_RIGHT, VOTE_TIE, VoteStore
@@ -28,6 +29,36 @@ from apps.video_arena.storage import VOTE_BOTH_BAD, VOTE_LEFT, VOTE_RIGHT, VOTE_
 logger = logging.getLogger(__name__)
 
 RANDOM_PROMPT = "🎲 Random prompt"
+
+
+class VideoCacheHeaders:
+    """Add Cache-Control to gradio's file responses so raters re-download nothing.
+
+    Gradio sends neither ``cache-control`` nor a 304 on ``If-None-Match``, so without this
+    every clip is fetched in full every time it appears — 64% of the bytes in a 400-round
+    session are re-fetches. Videos are served from their real paths, so each clip has one
+    stable URL and a rater pays for it once.
+
+    Written at the ASGI layer rather than as a ``BaseHTTPMiddleware`` so the video body is
+    never buffered through Python and byte-range responses pass straight through.
+    """
+
+    def __init__(self, app, max_age: int = 86400) -> None:
+        self.app = app
+        self.max_age = max_age
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or "/gradio_api/file=" not in scope.get("path", ""):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_cache(message):
+            if message["type"] == "http.response.start":
+                message.setdefault("headers", []).append(
+                    (b"cache-control", f"public, max-age={self.max_age}, immutable".encode()))
+            await send(message)
+
+        await self.app(scope, receive, send_with_cache)
 
 
 def _prompt_update(battle: Battle) -> dict:
@@ -61,8 +92,8 @@ class ArenaUI:
                 "battle": battle,
                 "t0": time.time()
             },
-            gr.update(value=str(battle.left_serve), label="A"),  # anonymous again
-            gr.update(value=str(battle.right_serve), label="B"),
+            gr.update(value=str(battle.left_video), label="A"),  # hidden behind A/B again
+            gr.update(value=str(battle.right_video), label="B"),
             _prompt_update(battle),
             gr.update(interactive=True),
             gr.update(interactive=True),
@@ -189,8 +220,7 @@ def build_demo(arena: Arena,
 
             with gr.Tab("Setup"):
                 gr.Markdown(arena.coverage())
-                gr.Markdown(f"\nManifest: `{arena.manifest_path}`\n\n"
-                            f"Anonymized video paths: `{arena.anonymize_paths}`")
+                gr.Markdown(f"\nManifest: `{arena.manifest_path}`")
 
         battle_outputs = [battle_state, vid_a, vid_b, prompt_md, btn_a, btn_b, btn_tie, btn_bad, next_btn, progress_md]
         vote_inputs = [battle_state, session_id, n_rated]
@@ -221,13 +251,14 @@ def main() -> None:
                    action="store_true",
                    help="start both players automatically; leave off so their audio tracks don't overlap")
     p.add_argument("--video-height", type=int, default=460, help="max player height in px")
-    p.add_argument("--no-anon-paths",
-                   action="store_true",
-                   help="serve videos from their real paths (model name becomes visible in the video URL)")
+    p.add_argument("--video-cache-seconds",
+                   type=int,
+                   default=86400,
+                   help="how long a rater's browser may reuse a downloaded clip; 0 disables caching")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    arena = Arena(args.manifest, anonymize_paths=not args.no_anon_paths)
+    arena = Arena(args.manifest)
     store = VoteStore(args.votes)
     logger.info("%s", arena.coverage().replace("**", ""))
     logger.info("votes -> %s", store.path)
@@ -237,10 +268,15 @@ def main() -> None:
                       rng=random.Random(args.seed) if args.seed is not None else None,
                       autoplay=args.autoplay,
                       video_height=args.video_height)
+    app_kwargs = {}
+    if args.video_cache_seconds > 0:
+        app_kwargs["middleware"] = [Middleware(VideoCacheHeaders, max_age=args.video_cache_seconds)]
+
     demo.launch(server_name=args.host,
                 server_port=args.port,
                 share=args.share,
-                allowed_paths=arena.serve_roots + [str(Path(store.path).parent)])
+                allowed_paths=arena.serve_roots + [str(Path(store.path).parent)],
+                app_kwargs=app_kwargs)
 
 
 if __name__ == "__main__":

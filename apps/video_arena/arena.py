@@ -12,8 +12,6 @@ import json
 import logging
 import os
 import random
-import shutil
-import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,9 +70,6 @@ class Battle:
     right: ModelEntry
     left_video: Path
     right_video: Path
-    # Paths actually handed to the UI (anonymized copies when enabled).
-    left_serve: Path
-    right_serve: Path
 
 
 def _is_video(p: Path) -> bool:
@@ -116,7 +111,7 @@ def _load_side_prompts(manifest_dir: Path) -> dict[str, str]:
 class Arena:
     """Holds the model roster, the prompt list, and the prompt x model video grid."""
 
-    def __init__(self, manifest_path: str | os.PathLike, anonymize_paths: bool = True) -> None:
+    def __init__(self, manifest_path: str | os.PathLike) -> None:
         self.manifest_path = Path(manifest_path).expanduser().resolve()
         raw = json.loads(self.manifest_path.read_text())
         root = self.manifest_path.parent
@@ -145,9 +140,6 @@ class Arena:
         if not self.prompts:
             raise ValueError(f"{self.manifest_path}: no prompt has videos from >=2 models; "
                              "check the `dir` paths and the video filenames")
-
-        self.anonymize_paths = anonymize_paths
-        self._anon_root = Path(tempfile.mkdtemp(prefix="video_arena_anon_")) if anonymize_paths else None
 
     # -- construction helpers ------------------------------------------------
 
@@ -213,34 +205,12 @@ class Arena:
         left, right = rng.sample(available, 2)
         lv, rv = self.videos[prompt.id][left.id], self.videos[prompt.id][right.id]
         bid = uuid.uuid4().hex[:12]
-        return Battle(battle_id=bid,
-                      prompt=prompt,
-                      left=left,
-                      right=right,
-                      left_video=lv,
-                      right_video=rv,
-                      left_serve=self._serve_path(bid, "L", lv),
-                      right_serve=self._serve_path(bid, "R", rv))
-
-    def _serve_path(self, battle_id: str, side: str, src: Path) -> Path:
-        """Hide the real path from the browser so the model cannot be read off the video URL."""
-        if self._anon_root is None:
-            return src
-        dst = self._anon_root / f"{battle_id}_{side}{src.suffix.lower()}"
-        if not dst.exists():
-            try:
-                os.symlink(src.resolve(), dst)
-            except OSError:
-                shutil.copy2(src, dst)
-        return dst
+        return Battle(battle_id=bid, prompt=prompt, left=left, right=right, left_video=lv, right_video=rv)
 
     @property
     def serve_roots(self) -> list[str]:
         """Directories gradio must be allowed to serve files from."""
-        roots = {str(m.video_dir.resolve()) for m in self.models}
-        if self._anon_root is not None:
-            roots.add(str(self._anon_root))
-        return sorted(roots)
+        return sorted({str(m.video_dir.resolve()) for m in self.models})
 
     def coverage(self) -> str:
         lines = [f"**{self.name}** — {len(self.models)} models × {len(self.prompts)} prompts"]

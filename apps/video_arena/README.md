@@ -169,10 +169,16 @@ showing the coverage), so a partially-finished sampling run still works.
 
 - The rater sees only "A" / "B"; the player labels become the checkpoint names after the vote.
 - Which model is A vs B is re-randomized every round, so position carries no signal.
-- By default videos are served through per-battle symlinks with opaque names
-  (`<battle_id>_L.mp4`) in a temp dir, so the checkpoint name is not visible in the
-  video URL either. `--no-anon-paths` disables this and serves the real paths.
-- The *real* paths and model ids are always what gets written to the vote log.
+- Videos are served from their real paths, so the checkpoint name *is* visible in the
+  video URL to anyone who opens the network tab. This is deliberate: hiding it needed a
+  layer of per-battle symlinks that also broke browser caching. The blinding is at the UI
+  level, which is enough for colleagues rating checkpoints in good faith.
+- Real paths and model ids are what gets written to the vote log.
+
+One clip has one stable URL, and the app sends `Cache-Control: max-age` on it
+(`--video-cache-seconds`, 0 to disable). Gradio sends no cache headers of its own and
+ignores `If-None-Match`, so without this every clip is re-fetched in full every time it
+comes up — 64% of the bytes in a 400-round session.
 
 Caveat: the mock videos are visually distinguishable by design (different palette and
 jitter per style). Real samples from checkpoints of the same model family generally
