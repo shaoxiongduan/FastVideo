@@ -26,8 +26,7 @@ import contextlib
 import logging
 import warnings
 
-from .admin import AdminControl
-from .chat import ChatPrompt, WebChat
+from .chat import WebChat
 from .config import Config, load_model_config
 from .director import Director
 from .engine import MODEL_FPS, MODEL_SAMPLE_RATE, Engine
@@ -78,19 +77,9 @@ async def serve(config: Config) -> None:
         idle_prompts=config.idle_prompts,
         idle_queue_target=config.idle_queue_target,
     )
-    admin = AdminControl(config.admin_users, upsampler, director)
-    if config.admin_users:
-        logger.info("admin commands (%s) enabled for: %s", ", ".join(admin.commands),
-                    ", ".join(sorted(config.admin_users)))
-
-    def route_chat(prompt: ChatPrompt) -> None:
-        """Admin commands to the admin handler; everything else is a prompt."""
-        if not admin.handle(prompt):
-            director.submit(prompt)
-
     # Viewers type into the same page they watch on, so the chat source and the
     # web app are two halves of one thing.
-    chat = WebChat(config.chat_command, (config.chat_command, *admin.commands))
+    chat = WebChat(config.chat_command)
     web = DemoWeb(chat, config.hls_dir, host=config.web_host, port=config.web_port)
     engine.add_listener(web.listener)
 
@@ -107,7 +96,7 @@ async def serve(config: Config) -> None:
         asyncio.create_task(engine.run(), name="engine"),
         asyncio.create_task(director.run(), name="director"),
         asyncio.create_task(director.run_playout(), name="playout"),
-        asyncio.create_task(chat.run(route_chat), name="chat"),
+        asyncio.create_task(chat.run(director.submit), name="chat"),
         asyncio.create_task(web.run(), name="webapp"),
     ]
     # Gated because any finished task is a shutdown signal and run_idle returns

@@ -37,13 +37,15 @@ def test_generating_is_the_generation_front() -> None:
     state = DemoState()
     assert state.generating is None
     state.on_message("queue_update", {"generation": [clip("a"), clip("b")], "playout": []})
-    assert state.generating["clip_id"] == "a"
+    generating = state.generating
+    assert generating is not None and generating["clip_id"] == "a"
 
 
 def test_now_playing_clears_when_a_clip_ends() -> None:
     state = DemoState()
     state.on_message("clip_started", {"clip": clip("a")})
-    assert state.now_playing["clip_id"] == "a"
+    playing = state.now_playing
+    assert playing is not None and playing["clip_id"] == "a"
     state.on_message("clip_finished", {"clip": clip("a"), "seconds_sent": 14.4})
     assert state.now_playing is None
 

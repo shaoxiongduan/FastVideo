@@ -9,8 +9,8 @@ continuous HLS stream on that same page.
 - `livestream/` — the whole app. Flat on purpose; there is one implementation
   of each thing, so there are no `chat/` or `sinks/` packages to hold variants
   that do not exist.
-- `livestream/presets/` — creative bundles (style + idle prompts), swappable
-  live with `!switch`.
+- `livestream/presets/` — creative bundles (style + idle prompts), chosen at
+  startup with `PRESET`.
 - `livestream/web/` — the single page, plus the logo and favicon it references.
 - `livestream/tests/` — runs anywhere with `-m "not gpu"`.
 - `serve_configs/fasth3.yaml` — what the checkpoint is asked for.
@@ -45,6 +45,10 @@ frames at its own resolutions.
   `_raise_dynamo_limits` guards against.
 - **`config.py` is the only reader of `os.environ` and the only YAML parser.**
   Keep it that way; everything else takes a `Config`.
+- **There is no runtime control surface.** The preset is fixed at startup, so
+  nothing mutates the director's prompt list or the upsampler's style once
+  running. Adding live control means re-adding the flush that keeps a switch
+  from leaving a queue of old-style clips on air.
 
 ## Comment style
 

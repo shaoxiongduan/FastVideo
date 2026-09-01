@@ -45,12 +45,6 @@ def presets_dir() -> Path:
     return Path(__file__).parent / "presets"
 
 
-def available_presets() -> list[str]:
-    """Preset names loadable right now, rescanned per call so a JSON dropped
-    into the folder mid-run is immediately switchable."""
-    return sorted(path.stem for path in presets_dir().glob("*.json"))
-
-
 def load_preset(name_or_path: str) -> dict:
     """Load and validate one preset: the creative bundle the stream runs.
 
@@ -255,10 +249,6 @@ class Config:
     chat_command: str
     chat_cooldown_s: float
 
-    # Admins: chat usernames allowed to send admin commands (see admin.py).
-    # Normalized lowercase; entries are bare names or `source:name`.
-    admin_users: frozenset[str]
-
     @staticmethod
     def load(argv: list[str] | None = None) -> Config:
         """Read `.env` + environment, apply CLI overrides, and validate."""
@@ -282,7 +272,7 @@ class Config:
         openai_api_key = os.environ.get("OPENAI_API_KEY", "")
         openai_base_url = os.environ.get("OPENAI_BASE_URL") or None
 
-        preset_name = args.preset or os.environ.get("PRESET", "default")
+        preset_name = args.preset or os.environ.get("PRESET", "unhinged")
         try:
             preset = load_preset(preset_name)
         except PresetError as error:
@@ -313,8 +303,6 @@ class Config:
             web_port=args.port or int(os.environ.get("WEB_PORT", "8081")),
             chat_command=os.environ.get("CHAT_COMMAND", "!prompt").strip(),
             chat_cooldown_s=float(os.environ.get("CHAT_COOLDOWN_S", "30")),
-            admin_users=frozenset(entry.strip().lower() for entry in os.environ.get("ADMIN_USERS", "").split(",")
-                                  if entry.strip()),
         )
         config.validate()
         return config
@@ -333,7 +321,6 @@ __all__ = [
     "Config",
     "ModelConfig",
     "PresetError",
-    "available_presets",
     "load_model_config",
     "load_preset",
     "require_weights",

@@ -56,12 +56,8 @@ class WebChat:
 
     name = "web"
 
-    def __init__(self, command: str = "!prompt", commands: tuple[str, ...] = ()) -> None:
+    def __init__(self, command: str = "!prompt") -> None:
         self._command = command
-        # Every word the router understands, admin commands included. Without
-        # this an admin command arrives as a video prompt and the stream
-        # cheerfully generates a clip of someone saying "!switch".
-        self._commands = tuple(commands) or (command, )
         self._queue: asyncio.Queue[ChatPrompt] = asyncio.Queue(maxsize=QUEUE_SIZE)
         self._dropped = 0
 
@@ -70,7 +66,7 @@ class WebChat:
         text = text.strip()
         if not text:
             return False
-        matched = match_command(text, self._commands)
+        matched = match_command(text, (self._command, ))
         word, body = matched if matched else (self._command, text)
         prompt = ChatPrompt(source=self.name, author=author or "viewer", text=body, command=command or word)
         try:

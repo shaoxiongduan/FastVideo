@@ -54,8 +54,8 @@ Two files, split by what they describe:
   length, canvas, sparse-attention kernels, GPU count, compile policy. Tuned
   values, in version control.
 * `.env` — what this *deployment* does: which LLM rewrites prompts, which
-  preset it runs, where the playlist goes, who may run admin commands.
-  Secrets and switches, not in version control.
+  preset it runs, where the playlist goes. Secrets and switches, not in
+  version control.
 
 `config.py` is the only reader of either; nothing else touches `os.environ`.
 
@@ -91,9 +91,10 @@ FastVideo version moves.
 ## Presets
 
 A preset is one JSON bundle: the `style` block every rewritten scene is
-written in, plus the `idle_prompts` that keep the stream fed. Drop a new one
-into `livestream/presets/` and an admin can switch to it live with
-`!switch <name>` — the folder is re-scanned per switch, so no restart.
+written in, plus the `idle_prompts` that keep the stream fed. Three ship:
+`unhinged` (mashups; the default), `variety` (iconic properties played
+straight), and `default` (the original conservative set). Pick one with
+`PRESET`; a path or `*.json` value loads a file from anywhere.
 
 ## What is deliberately not here
 
