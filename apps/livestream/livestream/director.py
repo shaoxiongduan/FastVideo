@@ -1,40 +1,32 @@
-"""The director: viewer prompts in, tagged scene groups on the model's queue.
+"""The director: viewer prompts in, tagged scene groups on the engine's queue.
 
-One prompt from chat becomes one *scene group*: the upsampler expands it into
-1..N self-contained scenes — a single shot, or a chunked short story — and
-the director enqueues them contiguously on the fast-h3 queue. The director is
-also the *playout* brain: the model's autoplay starts the playout front the
-instant the stream idles (gapless), and `run_playout` curates that front with
-`move` — viewer content before filler, judged purely from the metadata echo
-(`pick_next` in `group_tag.py`), because who asked for a clip is client-side
-knowledge the model deliberately never has. Rules that keep it coherent:
+One chat prompt becomes one *scene group*: the upsampler expands it into 1..N
+self-contained scenes -- a single shot, or a chunked short story -- which the
+director enqueues contiguously. It is also the playout brain: `run_playout`
+curates the front of the playout queue with `move` so the engine's next
+autoplay is already the right clip.
 
-  * The director is the queue's only writer. Both writers inside it — the
-    viewer worker (`run`) and the idle filler (`run_idle`) — serialize group
-    enqueues through one lock, so groups can never interleave.
-  * A group is only enqueued when the whole group fits the generation
-    queue (after evicting waiting filler if needed), so it cannot get stuck
-    half-in; a backlog already full of viewer content drops new prompts
-    instead of stalling them behind a wait. Every capacity is whatever the
-    connected deployment reports in `state_update`, never a constant.
-  * Viewer prompts outrank filler, and stay first-come-first-served among
-    themselves: viewer groups insert into the generation queue ahead of
-    waiting filler and behind waiting viewer clips (`enqueue`'s `position`),
-    the playout loop pops one built filler per tick when a full playout
-    queue blocks a viewer's build, and the idle filler stands down whenever
-    viewer work is pending.
+Rules that keep it coherent:
 
-Every scene carries the group's identity in the clip's `metadata` — an opaque
-string fast-h3 stores and echoes back on every message that references the
-clip. That is what lets this client (or any overlay built on it) reconstruct
-"scene 2/3 of *Neon Alley* by viewer_42" from a `clip_started` alone, without
-joining ids against local state that a reconnect may have lost. The same tag
-carries `generated: true` on filler clips, which is what makes them
-recognizably evictable later — including by a director restarted with no
-memory of enqueueing them.
+  * It is the queue's only writer. The viewer worker (`run`) and the idle
+    filler (`run_idle`) serialise their enqueues through one lock, so groups
+    can never interleave.
+  * A group is enqueued only when the whole group fits, so it cannot get
+    stuck half-in. Capacities come from the engine's `state_update`, never
+    from constants here.
+  * Viewer prompts outrank filler and stay first-come-first-served among
+    themselves: viewer groups insert ahead of waiting filler and behind
+    waiting viewer clips, the playout loop pops one built filler when a full
+    playout queue blocks a viewer's build, and the idle filler stands down
+    whenever viewer work is pending.
 
-Viewer prompts pass moderation before they reach the upsampler; the curated
-idle list does not need it (see `moderator.py` for the policy).
+Every scene carries its group's identity in the clip metadata, which the
+engine echoes back on every message referencing that clip. That is what lets
+"scene 2/3 of Neon Alley by viewer_42" be reconstructed from a `clip_started`
+alone, and what marks filler as evictable later.
+
+Viewer prompts pass moderation before the upsampler; the curated idle list
+does not need it.
 """
 
 from __future__ import annotations
@@ -48,16 +40,15 @@ from collections.abc import Sequence
 
 from .chat import ChatPrompt
 from .group_tag import is_generated, parse_group_tag, pick_next, viewer_insert_position
-from .moderator import Moderator
 from .engine import Engine
+from .moderator import Moderator
 from .upsampler import PromptUpsampler, SceneGroup
 
 logger = logging.getLogger(__name__)
 
-# How many chat prompts may wait for upsampling+enqueue before new ones are
-# turned away. Depth here is viewer wait time: at ~10s of video per scene the
-# model plays through a full generation queue in a couple of minutes; a long
-# backlog on top of that serves nobody.
+# Prompts waiting for upsampling+enqueue before new ones are turned away.
+# Depth here is viewer wait time, and a backlog on top of a full generation
+# queue serves nobody.
 _PENDING_LIMIT = 24
 
 # Enqueue retry cadence while the model refuses (reconnect mid-command, ...).
@@ -66,9 +57,8 @@ _RETRY_DELAY_S = 3.0
 # How often the idle filler re-checks whether the queue wants topping up.
 _IDLE_POLL_S = 3.0
 
-# How often the playout loop re-checks for an idle stream with a ready clip.
-# state_update/queue_update broadcasts keep the mirrors fresh; polling them is
-# what survives a missed message.
+# How often the playout loop re-checks. The broadcasts keep the mirrors
+# fresh; polling them is what survives a missed message.
 _PLAYOUT_POLL_S = 0.5
 
 
@@ -182,10 +172,8 @@ class Director:
         while True:
             prompt = await self._pending.get()
             try:
-                # A queue already full of viewer content takes no more: the
-                # prompt is dropped now, before it costs a moderation and an
-                # LLM call. Capacity is whatever the connected deployment
-                # reports, never a constant.
+                # Dropped now, before it costs a moderation and an LLM call.
+                # Capacity comes from the engine, never from a constant.
                 if self._viewer_clips_queued() >= self._link.playout_capacity:
                     logger.warning(
                         "[director] %d viewer clips already queued (budget %d); "
@@ -240,9 +228,8 @@ class Director:
         )
         while True:
             await asyncio.sleep(_IDLE_POLL_S)
-            # The list may be empty — at startup or after a preset switch to
-            # a preset without idle prompts; keep polling so a later switch
-            # revives the filler without a restart.
+            # May be empty after a switch to a preset with no idle prompts;
+            # keep polling so a later switch revives it without a restart.
             if not self._idle_prompts:
                 continue
             # The configured target self-clamps under the deployment's live
@@ -279,14 +266,10 @@ class Director:
     async def run_playout(self) -> None:
         """Curate the playout queue's front so autoplay always starts right.
 
-        The model's autoplay chains the playout front the instant the stream
-        idles — a millisecond gap, against the half-second-plus a
-        client-sent `play` costs. So the client never sends `play` in steady
-        state; it keeps the *front* correct instead: whenever `pick_next`
-        (viewer content before filler, the same policy the overlay
-        announces) disagrees with the queue's actual front, one `move` fixes
-        it. Reordering happens while a clip plays, ahead of the moment it
-        matters, so autoplay's next start is already the right clip.
+        The engine chains the playout front the instant the stream idles, so
+        nothing here sends an explicit play; it keeps the front correct
+        instead. Reordering happens while a clip plays, ahead of the moment it
+        matters.
         """
         while True:
             await asyncio.sleep(_PLAYOUT_POLL_S)
@@ -399,8 +382,8 @@ class Director:
                             " [auto]" if group.generated else "",
                         )
                         break
-                    # Bodyless reply = refused (command_error was logged by the
-                    # link) or the session dropped mid-command; wait and retry.
+                    # A bodyless reply means refused; the engine already
+                    # logged why. Wait and retry.
                     logger.warning(
                         "[director] enqueue of %s scene %d/%d refused; retrying in %.0fs",
                         group.group_id,

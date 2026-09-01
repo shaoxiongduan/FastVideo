@@ -12,8 +12,12 @@ chat ──▶ Director ──▶ PromptUpsampler (any OpenAI-compatible LLM)
           Engine ──▶ FastH3Backend ──▶ FastVideo (4 GPUs, VSA + FA4)
             │ frames + audio
             ▼
-          Pacer ──▶ HLS playlist ──▶ the page's <video>
+          Pacer ──▶ HlsSink ──▶ the page's <video>
 ```
+
+The page is the only way in and the only way out: there is no Twitch or
+YouTube integration and no RTMP target, because a chat box on the same origin
+as the video is all this needs.
 
 ## One process, on purpose
 
@@ -50,8 +54,10 @@ Two files, split by what they describe:
   length, canvas, sparse-attention kernels, GPU count, compile policy. Tuned
   values, in version control.
 * `.env` — what this *deployment* does: which LLM rewrites prompts, which
-  preset it runs, where the video goes, who may run admin commands. Secrets
-  and switches, not in version control.
+  preset it runs, where the playlist goes, who may run admin commands.
+  Secrets and switches, not in version control.
+
+`config.py` is the only reader of either; nothing else touches `os.environ`.
 
 `LIVESTREAM_WEIGHTS_PATH` points at the FastH3 bundle. The bundle is checked
 for completeness at startup, before any GPU work, so a missing component is a
@@ -68,11 +74,6 @@ livestream-server
 The web page and the HLS stream come up immediately; the model loads behind
 them, so a viewer arriving during startup sees the page and a live black
 stream rather than a refused connection.
-
-`--sink noop` discards the encoded output while leaving everything else
-running -- useful for exercising the chat, director and upsampler against real
-clips without writing a playlist. It still loads the model and still needs the
-GPUs; nothing here runs the pipeline without them.
 
 ## Tests
 

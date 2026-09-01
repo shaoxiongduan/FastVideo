@@ -1,23 +1,14 @@
 """The engine: generation, playout, and the state every other module reads.
 
-This is the whole model side of the app. It owns the FastH3 backend, the two
-clip queues, and the loop that turns built clips into a paced stream:
-
     director ──enqueue/pop/move──▶  Engine  ──frames+audio──▶  Pacer ──▶ sink
                                       │
                                       └──state_update / queue_update / clip_*
-                                         ──▶ listeners (webapp, director, overlay)
+                                         ──▶ listeners (webapp, director)
 
-**Why there is no transport here.** The generator and the broadcast run in one
-process, so a clip is handed to the pacer as the arrays it already is. The
-lossy hop this replaces -- pace to 24 fps, encode to WebRTC, decode, re-buffer
--- could shed video frames while audio flowed on, which is precisely how a
-picture drifts behind its own soundtrack. A local hand-off cannot shed.
-
-The command verbs (`enqueue`, `pop`, `move`) and the message kinds
-(`clip_queued`, `clip_generated`, `clip_started`, ...) are kept exactly as the
-director and the web app already speak them, so those modules are unchanged
-and unaware that nothing is being serialized any more.
+The generator and the broadcast share a process, so a built clip is handed to
+the pacer as the arrays it already is. There is no encode, no transport and
+therefore nothing that can shed video frames while audio flows on -- which is
+how a picture drifts behind its own soundtrack.
 """
 
 from __future__ import annotations
@@ -29,31 +20,26 @@ from collections.abc import Callable
 from typing import Any
 
 from . import clip_plan
-from .backend import FastH3Backend, ClipJob
+from .backend import ClipJob, FastH3Backend
 from .clip_queue import ClipEntry, ClipQueue, new_entry
 from .config import Config, ModelConfig, require_weights, resolve_model_path
 from .pacer import Pacer
 
 logger = logging.getLogger(__name__)
 
-# FastH3's fixed output timing. The canvas is configurable; these are not --
-# the checkpoint generates at 24 fps and the backend resamples every clip's
-# audio to the 48 kHz the sink expects.
+# Fixed by the checkpoint and the backend's resample; the canvas is not.
 MODEL_FPS = clip_plan.FPS
 MODEL_SAMPLE_RATE = 48_000
 
-# How long the idle loop sleeps with nothing to play. Short enough that a clip
-# turning ready starts promptly, long enough not to spin.
 POLL_SECONDS = 0.05
 
-# Frames handed to the pacer per step while a clip plays. Small keeps the
-# pacer's buffers near-empty, which is the condition its own A/V sync depends
-# on; too small would spend the loop in scheduling overhead.
+# Frames handed to the pacer per step. Small keeps its buffers near-empty,
+# which is the condition its A/V pairing depends on.
 EMIT_FRAMES = 4
 
 
 class Engine:
-    """Own the model, the queues, and the playout; expose both to the app."""
+    """Own the model, the queues and the playout."""
 
     def __init__(self, config: Config, model_config: ModelConfig) -> None:
         self._config = config
@@ -78,7 +64,6 @@ class Engine:
         self._seconds_sent = 0.0
 
         self._ready = asyncio.Event()
-        self._first_state = asyncio.Event()
         # Mirrors of what listeners were last told, so a late subscriber (the
         # web app builds its own mirror from these) reads the same values.
         self.state: dict[str, Any] = self._snapshot()
@@ -88,7 +73,7 @@ class Engine:
     # ---------------------------------------------------------------- wiring
 
     def attach_pacer(self, pacer: Pacer) -> None:
-        """Point the media path at the pacer (built after the first state)."""
+        """Point the media path at the pacer."""
         self._pacer = pacer
 
     def add_listener(self, listener: Callable[[str, dict], None]) -> None:
@@ -132,37 +117,25 @@ class Engine:
         """Whether the model is loaded and commands would take effect."""
         return self._ready.is_set()
 
-    async def wait_first_state(self) -> None:
-        """Resolve once the engine is loaded and has published its state."""
-        await self._first_state.wait()
-
     def _canvas_hw(self) -> tuple[int, int]:
         return clip_plan.canvas_for_choice(self._model.aspect)
 
     def _snapshot(self) -> dict[str, Any]:
         """Everything an observer can see, in one mapping.
 
-        The single source of the snapshot, so the greeting a joining viewer
-        gets and the broadcast everyone else gets can never disagree.
+        The single source, so a joining viewer's greeting and everyone else's
+        broadcast can never disagree.
         """
         height, width = self._canvas_hw()
-        current = self._playing
         return {
-            "clip_seconds": round(clip_plan.seconds_for_frames(self._model.clip_frames), 3),
-            "clip_seconds_min": clip_plan.MIN_SECONDS_PUBLISHED,
-            "clip_seconds_max": clip_plan.MAX_SECONDS_PUBLISHED,
-            "seed": self._seed,
-            "aspect": self._model.aspect,
             "width": width,
             "height": height,
-            "playing": current is not None,
-            "playing_clip_id": current.clip_id if current is not None else None,
+            "playing": self._playing is not None,
             "generation_queued": len(self._generation),
             "generation_capacity": self._generation.capacity,
             "playout_queued": len(self._playout),
             "playout_capacity": self._playout.capacity,
             "clips_played": self._clips_played,
-            "seconds_sent": round(self._seconds_sent, 2),
         }
 
     # -------------------------------------------------------------- messaging
@@ -182,7 +155,6 @@ class Engine:
     def _send_state(self) -> None:
         self.state = self._snapshot()
         self._emit("state_update", self.state)
-        self._first_state.set()
 
     def _send_queue(self) -> None:
         self.generation_clips = self._generation.snapshot()
@@ -226,7 +198,6 @@ class Engine:
             return None
 
     def _enqueue(self, data: dict) -> dict | None:
-        """Append one generation request to the generation queue."""
         prompt = str(data.get("prompt") or "").strip()
         if not prompt:
             self._refuse("enqueue", "The prompt is empty; a clip needs one.")
@@ -261,7 +232,7 @@ class Engine:
         return {"clip": entry.snapshot()}
 
     def _pop(self, data: dict) -> dict | None:
-        """Take one clip out of whichever queue holds it and free its slot."""
+        """Take one clip out of whichever queue holds it."""
         clip_id = str(data.get("clip_id") or "")
         entry = ((self._generation.get(clip_id) or self._playout.get(clip_id)) if clip_id else None)
         if entry is None:
@@ -283,7 +254,6 @@ class Engine:
         return {"clip": entry.snapshot()}
 
     def _move(self, data: dict) -> dict | None:
-        """Reposition one clip within the queue that holds it."""
         clip_id = str(data.get("clip_id") or "")
         position = data.get("position")
         position = position if isinstance(position, int) else 0

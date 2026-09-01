@@ -1,29 +1,15 @@
-"""The pacer: turn clip-shaped model output into a constant-rate broadcast.
+"""The pacer: turn clip-shaped generation into a constant-rate broadcast.
 
-fast-h3's output is clips with black holds in between — frames arrive at a
-strict 24 fps *while a clip plays* and not at all while the queue idles or the
-Reactor connection is being rebuilt. An RTMP ingest (and any live sink) needs
-the opposite: a frame every period and audio every period, forever, or players
-stall and the platform drops the broadcast.
+Clips arrive in bursts and stop entirely between them; a live sink needs a
+frame every period and audio every period, forever, or players stall. The
+pacer is a drift-free metronome at the model's frame rate: each tick it pops
+the oldest buffered frame (or repeats the last one, or black before anything
+arrived) and pulls exactly one tick of samples (padding with silence).
 
-The pacer is the adapter between the two. It is a drift-free metronome at the
-model's frame rate; each tick it:
-
-  * pops the oldest buffered video frame (or repeats the last one shown, or
-    black before anything arrived) and hands it to the sink;
-  * pulls exactly one tick's worth of int16 samples from the audio buffer
-    (padding with silence on underflow) and hands those to the sink.
-
-Both media types are buffered FIFO with the same shallow cap, which is what
-keeps them in sync: while a clip plays, both buffers stay near-empty and
-frames flow through with the same tiny delay; while nothing plays, both run
-dry and the pacer emits repeats + silence. Overflow (the model briefly ahead
-of the clock) drops the oldest entries of each, and is counted.
-
-The pacer never touches the Reactor connection and never stops on its own —
-it is created once, outlives session reconnects, and is cancelled only at
-shutdown. That is what keeps the platform-side stream uninterrupted while the
-client rebuilds a session behind it.
+Both buffers share one shallow cap, which is what keeps them together: while a
+clip plays both sit near-empty and flow through with the same tiny delay;
+while nothing plays both run dry. Depth here is end-to-end latency, so it is
+deliberately small.
 """
 
 from __future__ import annotations
@@ -35,8 +21,7 @@ import time
 
 import numpy as np
 
-from .overlay import Overlay
-from .sinks import AudioFormat, StreamSink, VideoFormat
+from .sink import AudioFormat, HlsSink, VideoFormat
 
 logger = logging.getLogger(__name__)
 
@@ -52,20 +37,12 @@ _RESNAP_PERIODS = 8
 class Pacer:
     """Constant-rate A/V clock between the model callbacks and one sink."""
 
-    def __init__(
-        self,
-        sink: StreamSink,
-        video: VideoFormat,
-        audio: AudioFormat,
-        overlay: Overlay | None = None,
-    ) -> None:
+    def __init__(self, sink: HlsSink, video: VideoFormat, audio: AudioFormat) -> None:
         if audio.sample_rate % video.fps != 0:
             raise ValueError(f"sample rate {audio.sample_rate} must divide evenly by fps {video.fps}")
         self._sink = sink
         self._video = video
         self._audio = audio
-        self._overlay = overlay
-        self._overlay_errors = 0
         self._samples_per_tick = audio.sample_rate // video.fps
 
         max_frames = int(video.fps * _BUFFER_SECONDS)
@@ -93,7 +70,7 @@ class Pacer:
     # ------------------------------------------------- model-facing intake
 
     def submit_video(self, frame: np.ndarray) -> None:
-        """Buffer one model frame. Called from the track's frame callback."""
+        """Buffer one generated frame."""
         frame = np.asarray(frame)
         if frame.shape[:2] != (self._video.height, self._video.width):
             frame = self._fit(frame)
@@ -116,10 +93,9 @@ class Pacer:
     def _fit(self, frame: np.ndarray) -> np.ndarray:
         """Center a differently-sized frame on the fixed black canvas.
 
-        The canvas is fixed for the sink's lifetime (raw-video geometry cannot
-        change mid-stream), so a model frame of another size — e.g. after a
-        `set_canvas` this client never sends — is letterboxed, not resized;
-        no interpolation dependency, and it cannot garble the stream.
+        Raw-video geometry cannot change mid-stream, so an odd-sized frame is
+        letterboxed rather than resized: no interpolation dependency, and it
+        cannot garble the stream.
         """
         height, width = self._video.height, self._video.width
         crop = frame[:height, :width, :3]
@@ -186,20 +162,7 @@ class Pacer:
                 self._repeat_run += 1
                 if self._audio_buffered > 0:
                     self._repeat_run_had_audio += 1
-            outgoing = self._last_frame
-            if self._overlay is not None:
-                # An overlay bug must not take the broadcast down; compose
-                # never mutates _last_frame, so the clean frame survives.
-                try:
-                    outgoing = self._overlay.compose(outgoing)
-                except Exception:
-                    self._overlay_errors += 1
-                    if self._overlay_errors in (1, 100) or self._overlay_errors % 10_000 == 0:
-                        logger.exception(
-                            "[pacer] overlay compose failed (%d times)",
-                            self._overlay_errors,
-                        )
-            self._sink.send_video(outgoing)
+            self._sink.send_video(self._last_frame)
             self._sink.send_audio(self._pull_audio_tick())
             self.ticks += 1
 

@@ -1,38 +1,30 @@
-"""Prompt upsampling: turn a viewer's rough idea into fast-h3-ready scenes.
+"""Prompt upsampling: a viewer's rough idea into FastH3-ready scenes.
 
-One LLM call per prompt, against any OpenAI-compatible endpoint. The model
-picks the shape the idea calls for — one scene of any legal length, or a
-chunked short story of up to `max_chunks` short clips with a setup,
-development, and payoff — writes each scene as a self-contained
-text-to-video prompt in the configured style/character, and picks each
-scene's length in seconds.
+One LLM call per prompt against any OpenAI-compatible endpoint. The model
+picks the shape the idea calls for -- one scene, or a chunked short story of
+up to `max_chunks` clips -- writes each scene as a self-contained
+text-to-video prompt in the configured style, and picks each scene's length.
 
-Why the prompt is written the way it is — these rules come from how fast-h3
-actually behaves, so keep them intact when editing:
+The system prompt is written around four facts about FastH3. Keep them intact
+when editing it:
 
-  * **Every scene is an independent clip with no memory.** The single biggest
-    quality lever. A scene that says "the same forest" renders a *different*
-    forest; each scene must re-describe the entire setting, subjects, light,
-    and style from scratch. (Learned on the earlier story-livestream client,
-    where under-described scenes visibly "lost" characters between cuts.)
-  * **800 characters is the model's hard cap per prompt** (`MAX_PROMPT_CHARS`
-    in `fasth3_types.py`); the LLM is told 750 to leave headroom, and
-    `_sanitize` hard-truncates anyway, because LLMs do not count characters
-    reliably.
-  * **fast-h3 renders synchronized audio, spoken language included**, so
-    the prompt asks for explicit quoted dialogue (who speaks, the exact
-    words, the voice's tone) whenever the idea implies speech, and for a
-    brief soundscape clause — clips come out flat without them.
-  * **Length policy: a single-clip generation always runs the maximum
-    length** (the live `clip_seconds_max` from `state_update`), enforced in
-    code after validation — long enough for the scene to breathe. The
-    short end of the range is reserved for transition chunks inside
-    multi-scene stories (an establishing cut, a reaction beat); content
-    chunks run long.
-  * **Safety is moderation's job, not this prompt's.** The viewer's idea has
-    already passed the moderator by the time it arrives here, so the prompt
-    asks for faithful staging and never for softening or reinterpreting the
-    idea (see `moderator.py`).
+  * **Each scene is an independent clip with no memory.** The biggest quality
+    lever by far. "The same forest" renders a *different* forest, so every
+    scene must re-describe setting, subjects, light and style from scratch.
+  * **800 characters is the hard cap per prompt.** The LLM is told 750 for
+    headroom and `_sanitize` truncates anyway, because LLMs do not count
+    characters reliably.
+  * **Audio is generated with the video, speech included.** The prompt asks
+    for quoted dialogue (who speaks, the words, the tone) whenever the idea
+    implies speech, and for a brief soundscape clause. Clips come out flat
+    without them.
+  * **A single-clip generation always runs the maximum length**, enforced in
+    code after validation, so the scene can breathe. Short lengths are
+    reserved for transition chunks inside multi-scene stories.
+
+Safety is `moderator.py`'s job: the idea has already passed it by the time it
+arrives here, so this prompt asks for faithful staging and never for
+softening or reinterpreting.
 """
 
 from __future__ import annotations
@@ -46,12 +38,9 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-# fast-h3's enqueue cap (fasth3_types.MAX_PROMPT_CHARS). Hard limit, enforced
-# server-side; _sanitize truncates to it.
+# The engine's enqueue cap; _sanitize truncates to it.
 MAX_PROMPT_CHARS = 800
-# How many LLM calls one idea gets before the raw-prompt fallback. Each
-# attempt is warned about individually with the reply's head, so a systematic
-# failure is diagnosable from the log.
+# LLM calls one idea gets before falling back to the raw prompt.
 _MAX_ATTEMPTS = 3
 
 # What the LLM is asked to stay under, leaving headroom for its poor counting.

@@ -1,23 +1,16 @@
 """Moderation for viewer prompts, via the OpenAI moderations API.
 
-Runs on its own endpoint and key (`MODERATION_*` in the environment), falling
-back to the upsampling credentials when unset — because the two are often
-*not* the same service: an OpenAI-compatible inference gateway typically does
-not expose `/moderations` (Reactor's corp gateway answers it with
-`provider_not_allowed`), so moderation usually points at api.openai.com while
-upsampling goes through the gateway.
+Its own endpoint and key (`MODERATION_*`), falling back to the upsampling
+credentials, because the two are often not the same service: an
+OpenAI-compatible inference gateway usually does not expose `/moderations`.
 
-Policy decisions, deliberate:
-  * Only the viewer's raw prompt is checked, and this is the **only** safety
-    gate: the upsampler deliberately stages ideas faithfully rather than
-    softening them, so what passes here is what gets rendered. Idle-filler
-    prompts are a curated list in this repo and skip the check.
-  * Errors **fail closed**: a prompt that cannot be checked is rejected. A
-    silent fail-open would quietly turn moderation off exactly when the
-    endpoint misbehaves. If the stream must keep accepting prompts without a
-    working moderation endpoint, disable moderation explicitly
-    (`MODERATION_ENABLED=0`) — that state is then visible in the startup log
-    instead of hidden in per-prompt errors.
+This is the only safety gate -- the upsampler stages ideas faithfully rather
+than softening them, so what passes here is what gets rendered. Idle filler is
+a curated list in this repo and skips the check.
+
+Errors fail closed. A silent fail-open would turn moderation off exactly when
+the endpoint misbehaves; running without it should be the explicit, logged
+`MODERATION_ENABLED=0` instead.
 """
 
 from __future__ import annotations

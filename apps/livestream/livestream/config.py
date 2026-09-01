@@ -42,42 +42,23 @@ class PresetError(ValueError):
 
 
 def presets_dir() -> Path:
-    """The `presets/` folder next to this module."""
     return Path(__file__).parent / "presets"
 
 
 def available_presets() -> list[str]:
-    """Preset names loadable right now, read fresh from the folder.
-
-    Scanned on every call, so a JSON dropped into `presets/` mid-run is
-    immediately switchable (see `admin.py`'s `!switch`).
-    """
+    """Preset names loadable right now, rescanned per call so a JSON dropped
+    into the folder mid-run is immediately switchable."""
     return sorted(path.stem for path in presets_dir().glob("*.json"))
 
 
 def load_preset(name_or_path: str) -> dict:
     """Load and validate one preset: the creative bundle the stream runs.
 
-    `PRESET` names a file in the `presets/` folder next to this module
-    (`default` -> `presets/default.json`); a value containing a path
-    separator or ending in `.json` is used as an explicit path instead.
-
-    The format, all of it:
-        {
-          "name":        "display name (optional)",
-          "description": "what this preset is (optional)",
-          "style":       "the style/character block every upsampled scene
-                          is written in (required, non-empty)",
-          "idle_prompts": ["premade prompt", ...]  (required; may be empty,
-                          which disables the idle filler)
-        }
-
-    Unknown keys are ignored, so presets can carry their own notes.
-
-    Raises:
-        PresetError: when the file is missing, not JSON, or missing a
-            required key. Startup turns this into a clean exit; the admin
-            `!switch` path logs it and keeps the current preset.
+    A bare name resolves against `presets/`; a value with a path separator or
+    a `.json` suffix is used as a path. The format is `style` (the block every
+    upsampled scene is written in) and `idle_prompts` (which may be empty,
+    disabling the filler); other keys are ignored, so a preset can carry its
+    own notes.
     """
     if "/" in name_or_path or name_or_path.endswith(".json"):
         path = Path(name_or_path)
@@ -202,11 +183,7 @@ def _parse_warmup_lengths(raw: Any, clip_frames: int) -> tuple[int, ...]:
 
 
 def resolve_model_path(config: ModelConfig, weights_root: Path) -> Path:
-    """The checkpoint directory inside the weights bundle.
-
-    ``checkpoint_dir: "."`` means the snapshot's components sit directly under
-    the weights root.
-    """
+    """The checkpoint directory inside the bundle; "." means the root itself."""
     subdir = str(config.runtime.get("checkpoint_dir", "."))
     if subdir in ("", "."):
         return weights_root
@@ -265,27 +242,18 @@ class Config:
     # Idle filler
     idle_queue_target: int
 
-    # Overlay (which overlay runs is code, main.py; this only switches it)
-    overlay_enabled: bool
-
-    # Sink
-    sink: str  # "rtmp" | "hls" | "noop"
-    rtmp_url: str | None
-    rtmp_video_bitrate_k: int
+    # Output: the HLS playlist the page plays, written by `sink.py`.
     hls_dir: str
+    video_bitrate_k: int
 
-    # The demo's own watch page (webapp.py): video plus a live chat and queue
-    # panel, on one HTTP origin so a single tunnel publishes the whole thing.
-    web_enabled: bool
+    # The watch page: video, chat and the queue on one HTTP origin, so a
+    # single tunnel publishes the whole thing.
     web_host: str
     web_port: int
 
     # Chat
     chat_command: str
     chat_cooldown_s: float
-    twitch_channel: str | None
-    youtube_video_id: str | None
-    youtube_api_key: str | None
 
     # Admins: chat usernames allowed to send admin commands (see admin.py).
     # Normalized lowercase; entries are bare names or `source:name`.
@@ -302,8 +270,6 @@ class Config:
             default=None,
             help="engine YAML (default serve_configs/fasth3.yaml)",
         )
-        parser.add_argument("--sink", default=None, choices=("rtmp", "hls", "noop"))
-        parser.add_argument("--rtmp-url", default=None, help="override RTMP_URL")
         parser.add_argument("--preset", default=None, help="override PRESET")
         parser.add_argument("--port", default=None, type=int, help="override WEB_PORT")
         args = parser.parse_args(argv)
@@ -341,19 +307,12 @@ class Config:
             moderation_base_url=os.environ.get("MODERATION_BASE_URL") or openai_base_url,
             moderation_model=os.environ.get("MODERATION_MODEL", "omni-moderation-latest"),
             idle_queue_target=int(os.environ.get("IDLE_QUEUE_TARGET", "6")),
-            overlay_enabled=_flag(os.environ.get("OVERLAY_ENABLED", "1")),
-            sink=(args.sink or os.environ.get("SINK", "noop")).lower(),
-            rtmp_url=args.rtmp_url or os.environ.get("RTMP_URL") or None,
-            rtmp_video_bitrate_k=int(os.environ.get("RTMP_VIDEO_BITRATE_K", "4500")),
             hls_dir=os.environ.get("HLS_DIR", "./hls"),
-            web_enabled=_flag(os.environ.get("WEB_ENABLED", "0")),
+            video_bitrate_k=int(os.environ.get("VIDEO_BITRATE_K", "4500")),
             web_host=os.environ.get("WEB_HOST", "0.0.0.0"),
             web_port=args.port or int(os.environ.get("WEB_PORT", "8081")),
             chat_command=os.environ.get("CHAT_COMMAND", "!prompt").strip(),
             chat_cooldown_s=float(os.environ.get("CHAT_COOLDOWN_S", "30")),
-            twitch_channel=os.environ.get("TWITCH_CHANNEL") or None,
-            youtube_video_id=os.environ.get("YOUTUBE_VIDEO_ID") or None,
-            youtube_api_key=os.environ.get("YOUTUBE_API_KEY") or None,
             admin_users=frozenset(entry.strip().lower() for entry in os.environ.get("ADMIN_USERS", "").split(",")
                                   if entry.strip()),
         )
@@ -366,16 +325,6 @@ class Config:
             raise SystemExit("LIVESTREAM_WEIGHTS_PATH (or --weights) must point at the FastH3 bundle.")
         if not self.openai_api_key:
             raise SystemExit("OPENAI_API_KEY is required for prompt upsampling.")
-        if self.sink == "rtmp" and not self.rtmp_url:
-            raise SystemExit("SINK=rtmp needs RTMP_URL (including the stream key).")
-        if self.sink not in ("rtmp", "hls", "noop"):
-            raise SystemExit(f"Unknown SINK {self.sink!r}; use rtmp, hls or noop.")
-        if self.web_enabled and self.sink != "hls":
-            # The page's <video> reads the HLS playlist this server writes;
-            # any other sink leaves it with nothing to play.
-            raise SystemExit("WEB_ENABLED=1 needs SINK=hls (the page plays that playlist).")
-        if self.youtube_video_id and not self.youtube_api_key:
-            raise SystemExit("YOUTUBE_VIDEO_ID needs YOUTUBE_API_KEY.")
         if not self.chat_command.startswith("!"):
             raise SystemExit("CHAT_COMMAND should start with '!' (e.g. !prompt).")
 

@@ -164,7 +164,7 @@
 
 <script>
 // ---------------------------------------------------------------- video
-// The stream arrives as HLS written by sinks/hls.py. Safari plays a playlist
+// The stream arrives as HLS written by sink.py. Safari plays a playlist
 // natively; everything else needs hls.js. A live playlist can 404 for the few
 // seconds before ffmpeg writes its first segment, and it can go stale across an
 // ffmpeg restart, so both paths simply retry rather than surfacing an error.
@@ -392,7 +392,7 @@ function render(state) {
   renderChat(state);
 }
 
-// One socket, reconnecting forever: the demo outlives any single link session.
+// One socket, reconnecting forever: the page outlives any single connection.
 let lastState = null;
 let lastStateAt = performance.now();
 let lastSeq = -1;

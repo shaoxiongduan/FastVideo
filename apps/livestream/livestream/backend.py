@@ -1,18 +1,17 @@
-"""The FastVideo engine behind FastH3: GPU work, and nothing stream-facing.
+"""The FastVideo side of FastH3: GPU work, and nothing stream-facing.
 
-One :class:`FastH3Backend` owns the multi-GPU ``VideoGenerator``, the
-environment profile it must be built under, the load-time warm-up, and a single
-persistent worker thread that builds clips one at a time. ``engine.py`` submits
-work with :meth:`FastH3Backend.submit` and polls the returned
-:class:`ClipJob`; nothing in here knows about queues, chat, or the sink.
+`FastH3Backend` owns the multi-GPU `VideoGenerator`, the environment profile
+it must be built under, the load-time warm-up, and one worker thread that
+builds clips serially. `engine.py` calls `submit` and polls the `ClipJob` it
+gets back; nothing here knows about queues, chat or the sink.
 
-torch, torchaudio and fastvideo are imported lazily inside methods, so
-importing this module needs none of them -- which is what lets the config and
-queue tests run on a machine with no GPU.
+torch, torchaudio and fastvideo are imported inside methods, so importing this
+module needs none of them and the config tests can run without a GPU.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import threading
@@ -20,34 +19,27 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .log import get_logger
-
 from . import clip_plan
 from .config import ModelConfig
 
-logger = get_logger(__name__)
+logger = logging.getLogger("livestream.backend")
 
 FRAME_RATE = clip_plan.FPS
 
-# WebRTC-native rate every clip's waveform is resampled to. The checkpoint's
-# audio decoder is 32 kHz; the wire is 48 kHz.
+# The checkpoint's audio decoder runs at 32 kHz; the sink wants 48 kHz.
 OUTPUT_SAMPLE_RATE = 48_000
 NATIVE_SAMPLE_RATE = 32_000
 
-# How often a blocking wait on the worker re-checks. Used only during load().
 _WORKER_POLL_SECONDS = 0.1
 
-# What the warm-up builds. Never reaches a client: warm-up output is discarded,
-# and its only job is to be a syntactically ordinary prompt.
+# Warm-up output is discarded; this only has to be an ordinary prompt.
 WARMUP_PROMPT = "A slow cinematic shot of sunlight moving across a quiet room."
 
-# Every prompt is padded (or token-truncated) to exactly this many tokens
-# before it reaches the engine. Regional torch.compile is keyed on the packed
-# sequence length, which includes the prompt's token count, so a novel prompt
-# length would otherwise recompile — measured at ~23 s against ~15 s for the
-# clip itself. One fixed length means one compiled shape, captured by the
-# warm-up and reused by every clip. 256 comfortably holds the 800-character
-# prompt cap.
+# Every prompt is padded or truncated to exactly this many tokens. Regional
+# torch.compile keys on the packed sequence length, which includes the prompt's
+# token count, so a novel length recompiles -- ~23 s against ~15 s for the clip
+# itself. One fixed length is one compiled shape, warmed once. 256 comfortably
+# holds the 800-character cap.
 PROMPT_TOKENS = 256
 
 
@@ -89,12 +81,11 @@ class FastH3Backend:
     # ------------------------------------------------------------------ load
 
     def load(self) -> None:
-        """Build the eight-GPU generator and warm every configured clip shape.
+        """Build the generator and warm every configured clip shape.
 
-        Runs once at startup. The caller's ``load()`` returning is what marks
-        the pod ready, so everything that can fail — missing kernels, a broken
-        native linkage, a cold compile — must fail here, not on the first
-        client's clip.
+        Runs once at startup, and this returning is what lets the engine
+        accept work -- so everything that can fail (missing kernels, a broken
+        native linkage, a cold compile) must fail here, not on a viewer's clip.
         """
         # Must happen before the generator is built: the engine spawns worker
         # processes, which inherit os.environ, and these select the attention
@@ -105,12 +96,8 @@ class FastH3Backend:
 
         runtime = self._config.runtime
         num_gpus = int(runtime.get("num_gpus", 4))
-        logger.info(
-            "building fast-h3 generator",
-            model_path=str(self._model_path),
-            num_gpus=num_gpus,
-            clip_frames=self._config.clip_frames,
-        )
+        logger.info("building the generator: %s, %d gpu(s), %d-frame clips", self._model_path, num_gpus,
+                    self._config.clip_frames)
 
         from fastvideo import VideoGenerator
 
@@ -121,7 +108,7 @@ class FastH3Backend:
         self._worker.start()
         self._preload_native_imports()
         self._run_blocking(self._warmup)
-        logger.info("fast-h3 backend loaded")
+        logger.info("backend loaded")
 
     def _load_tokenizer(self) -> None:
         """Load the bundle's tokenizer and calibrate the one-token pad filler.
@@ -163,25 +150,22 @@ class FastH3Backend:
         while encode(padded) < PROMPT_TOKENS:
             padded += self._pad_filler
         if encode(padded) != PROMPT_TOKENS:
-            logger.warning("prompt padded to the wrong token count", got=encode(padded), want=PROMPT_TOKENS)
+            logger.warning("prompt padded to %d tokens, wanted %d", encode(padded), PROMPT_TOKENS)
         return padded
 
     @staticmethod
     def _raise_dynamo_limits() -> None:
         """Stop a novel tensor shape from being a hard failure.
 
-        Every distinct clip length is a torch.compile shape, and the fullgraph
-        regional-compile route treats exceeding dynamo's recompile limit as a
-        crash rather than a fallback. FastVideo's own imports lower the limit
-        (``layers/lora/linear.py`` to 16, longcat's ``bsa_interface.py`` to
-        32), so this raises it again and, more importantly, turns overflow
-        back into a recompile.
+        Each clip length is a torch.compile shape, and the fullgraph regional
+        route treats exceeding dynamo's recompile limit as a crash rather than
+        a fallback. FastVideo's own imports lower it (`layers/lora/linear.py`
+        to 16, longcat's `bsa_interface.py` to 32), so this raises it again
+        and turns overflow back into a recompile.
 
-        This process is the one that matters: the engine workers FastVideo
-        spawns inherit ``os.environ`` but not module state, and they hit the
-        same lowering on import. Running one pinned clip length keeps every
-        process far under even the lowered limit -- with a varied
-        ``warmup_lengths`` that stops being true, and this is the seatbelt.
+        One pinned clip length keeps every process far under even the lowered
+        limit; a varied `warmup_lengths` is where this becomes the seatbelt it
+        is meant to be.
         """
         import torch._dynamo.config as dynamo_config
 
@@ -191,16 +175,15 @@ class FastH3Backend:
         dynamo_config.accumulated_recompile_limit = max(512, dynamo_config.accumulated_recompile_limit)
         dynamo_config.accumulated_cache_size_limit = max(512, dynamo_config.accumulated_cache_size_limit)
         dynamo_config.fail_on_recompile_limit_hit = False
-        logger.info("dynamo recompile limits raised", recompile_limit=dynamo_config.recompile_limit)
+        logger.info("dynamo recompile limit raised to %d", dynamo_config.recompile_limit)
 
     @staticmethod
     def _preload_native_imports() -> None:
         """Touch every deferred native import the build path needs.
 
-        Lazy imports mean the first import would otherwise happen on the first
-        real clip — after load, after warm-up, after the pod reports ready —
-        where a linkage failure is a dead session rather than a startup error.
-        The resample below is a real call, so it fails here or not at all.
+        Otherwise the first one happens on the first real clip, where a broken
+        linkage is a dead stream rather than a startup error. The resample is a
+        real call, so it fails here or not at all.
         """
         import numpy  # noqa: F401
         import torch
@@ -211,11 +194,11 @@ class FastH3Backend:
     # --------------------------------------------------------------- profile
 
     def _apply_profile_environment(self) -> None:
-        """Set the FastH3 profile environment, exactly as the reference CLI does.
+        """Set the FastH3 profile environment, as the reference CLI does.
 
-        Mirrors ``examples/inference/basic/basic_fasth3.py:profile_environment``.
-        Values are explicit even for disabled features, so a shell's inherited
-        experiment settings cannot silently change the profile a pod serves.
+        Mirrors `examples/inference/basic/basic_fasth3.py:profile_environment`.
+        Disabled features are set explicitly too, so a shell's inherited
+        experiment settings cannot silently change what gets served.
         """
         cfg = self._config.inference
         vsa_kernel = str(cfg.get("vsa_kernel", "sm100a"))
@@ -243,10 +226,10 @@ class FastH3Backend:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-        logger.info("fast-h3 profile", **{k: (v or "<unset>") for k, v in environment.items()})
+        logger.info("profile: %s", " ".join(f"{k}={v or '<unset>'}" for k, v in environment.items()))
 
     def _validate_profile_dependencies(self) -> None:
-        """Fail before the 148 GB load when the selected fast route is absent."""
+        """Fail before the weights load when the selected fast route is absent."""
         import importlib.util
 
         cfg = self._config.inference
@@ -270,7 +253,7 @@ class FastH3Backend:
                                    "extension. Install a matching wheel, or set inference.vsa_kernel: triton.")
 
     def _generator_config(self) -> Any:
-        """The engine shape, mirroring ``basic_fasth3.py:build_generator_config``."""
+        """The engine shape, mirroring `basic_fasth3.py`."""
         from fastvideo.api import (
             CompileConfig,
             ComponentConfig,
@@ -355,9 +338,8 @@ class FastH3Backend:
     def _run_blocking(self, fn) -> None:
         """Run work on the worker, block until it finishes, and re-raise its failure.
 
-        Used only by ``load()``. Blocking here is the point: the runtime marks
-        the pod ready when the model's ``load()`` returns, so a failed warm-up
-        has to stop startup rather than being discovered by the first client.
+        Used only by `load()`, where blocking is the point: a failed warm-up
+        has to stop startup rather than surface on a viewer's first clip.
         """
         job = ClipJob(fn)
         self._jobs.put(job)
@@ -369,31 +351,24 @@ class FastH3Backend:
     # --------------------------------------------------------------- warm-up
 
     def _warmup(self) -> None:
-        """Build one throwaway clip per shape, before the pod reports ready.
+        """Build one throwaway clip per shape before reporting ready.
 
-        Every distinct frame count and canvas is a separate one-time cost —
-        regional compile, sparse-kernel autotune, allocator growth — and paying
-        it here means the first real clip builds at warm speed. Results are
-        discarded: ``return_frames=False, save_video=False`` skips the whole
-        post-decode path, so a warm-up costs generation time and nothing else.
+        Every distinct frame count and canvas costs a one-time regional
+        compile, sparse-kernel autotune and allocator growth; paying it here
+        means the first real clip builds at warm speed.
 
-        Two axes are warmed: every configured canvas at the default length,
-        and every configured length (``inference.warmup_lengths``) at the
-        primary canvas — the shapes a feed of varied `seconds` values actually
-        hits. The cross product is deliberately not warmed; a non-primary
-        canvas at a non-default length still pays its stall on first use.
+        Two axes, not their cross product: every configured canvas at the
+        default length, and every configured length at the primary canvas. A
+        non-primary canvas at a non-default length still stalls on first use.
         """
         aspects = self._config.warmup_aspects
         cold = [a for a in clip_plan.ASPECT_CHOICES if a not in aspects]
         if cold:
-            logger.info("aspects left cold; their first clip pays a one-off compile stall", aspects=cold)
+            logger.info("aspects left cold, their first clip pays a compile stall: %s", cold)
         shapes: list[tuple[str, int]] = [(aspect, self._config.clip_frames) for aspect in aspects]
         shapes += [(aspects[0], frames) for frames in self._config.warmup_frames if frames != self._config.clip_frames]
-        logger.info(
-            "warm-up plan",
-            shapes=len(shapes),
-            lengths=[round(clip_plan.seconds_for_frames(f), 3) for f in self._config.warmup_frames],
-        )
+        logger.info("warming %d shape(s), lengths %s", len(shapes),
+                    [round(clip_plan.seconds_for_frames(f), 3) for f in self._config.warmup_frames])
         for index, (aspect, frames) in enumerate(shapes, start=1):
             height, width = clip_plan.canvas_for_choice(aspect)
             started = time.monotonic()
@@ -406,15 +381,8 @@ class FastH3Backend:
                     width=width,
                     keep_output=False,
                 ))
-            logger.info(
-                "warmed clip shape",
-                progress=f"{index}/{len(shapes)}",
-                aspect=aspect,
-                frames=frames,
-                height=height,
-                width=width,
-                seconds=round(time.monotonic() - started, 2),
-            )
+            logger.info("warmed %d/%d: %s %df at %dx%d in %.2fs", index, len(shapes), aspect, frames, height, width,
+                        time.monotonic() - started)
 
     # ------------------------------------------------------------ generation
 
@@ -428,11 +396,10 @@ class FastH3Backend:
         width: int,
         keep_output: bool,
     ):
-        """Build one generation request.
+        """Build one generation request, mirroring `basic_fasth3.py`.
 
-        Mirrors ``basic_fasth3.py:build_request``. ``keep_output=False`` is the
-        warm-up shape: it skips the whole post-decode path, so a warm-up costs
-        generation time and nothing else.
+        `keep_output=False` is the warm-up shape: it skips the post-decode
+        path, so a warm-up costs generation time and nothing else.
         """
         from fastvideo.api import GenerationRequest, OutputConfig, SamplingConfig
 
@@ -457,7 +424,7 @@ class FastH3Backend:
         )
 
     def _generate_clip(self, *, frames: int, prompt: str, seed: int, height: int, width: int):
-        """Build one clip and convert it to what the output tracks want.
+        """Build one clip and convert it to what the pacer wants.
 
         Returns ``(frames_list, samples)``: a list of RGB uint8 ``[h, w, 3]``
         arrays and int16 ``[1, samples]`` at 48 kHz, trimmed to exactly
@@ -485,13 +452,8 @@ class FastH3Backend:
         # live in the message itself so every log formatter carries them.
         content = len(frames_list) / FRAME_RATE
         gpus = int(self._config.runtime.get("num_gpus", 4))
-        logger.info("clip built",
-                    frames=len(frames_list),
-                    content_s=round(content, 2),
-                    built_s=round(built, 2),
-                    realtime_x=round(content / built, 2),
-                    gpus=gpus,
-                    stages=self._stage_times(result))
+        logger.info("clip built: %df (%.2fs content) in %.2fs = %.2fx realtime on %d gpus, stages=%s", len(frames_list),
+                    content, built, content / built, gpus, self._stage_times(result))
         return frames_list, samples
 
     @staticmethod

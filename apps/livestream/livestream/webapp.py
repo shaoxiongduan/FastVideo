@@ -1,27 +1,19 @@
-"""The demo's own watch page: video on the left, live chat and queue on the right.
+"""The watch page: video on the left, live chat and queue on the right.
 
-Upstream's client targets Twitch and YouTube, where the page belongs to the
-platform, so it burns status into the video pixels (`overlay/`). A private demo
-owns its page, which is better in every way that matters here: the queue is real
-text rather than baked-in pixels, it costs no encode, and it can show more than
-fits legibly on a frame.
+Everything the panel shows is folded from the engine's own message stream --
+the mirror registers with `Engine.add_listener` and rebuilds itself from
+`state_update`, `queue_update` and the `clip_*` messages -- so this module
+holds no state of its own that could drift out of step.
 
-Everything the panel shows is read off the model's own message stream. The state
-mirror registers with `Engine.add_listener` and rebuilds itself from
-`state_update`, `queue_update` and the `clip_*` messages -- the same echo the
-director and overlay already trust -- so this module adds no state of its own
-that a reconnect could desynchronise, and needs no changes anywhere else.
-
-One HTTP origin serves the whole demo: the page, the HLS segments, the state
-websocket, and the chat endpoint. That is deliberate. Cloudflare Tunnel proxies
-one port, so "publish the demo" is pointing `cloudflared` at this server and
-nothing else.
+One HTTP origin serves the page, the HLS segments, the state websocket and the
+chat endpoint, because a tunnel proxies one port: publishing the whole demo is
+pointing `cloudflared` at this server and nothing else.
 
 Routes:
     GET  /              the page
-    GET  /assets/<file> the logo and favicon the page references
-    GET  /hls/<file>    the HLS playlist and segments (written by `sinks/hls.py`)
-    GET  /healthz       whether the engine is loaded and commands take effect
+    GET  /assets/<file> the logo and favicon it references
+    GET  /hls/<file>    the playlist and segments (written by `sink.py`)
+    GET  /healthz       whether the engine is loaded
     WS   /state         one JSON snapshot on connect, then one per change
     POST /chat          {"author": str, "text": str} -> a prompt for the director
 """
@@ -40,7 +32,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .chat.web import WebChat
+from .chat import WebChat
 from .group_tag import parse_group_tag
 
 logger = logging.getLogger("livestream.webapp")
@@ -66,10 +58,9 @@ def _clip_view(clip: dict[str, Any]) -> dict[str, Any]:
     director wrote into its metadata, which the model echoes untouched.
     """
     tag = parse_group_tag(clip.get("metadata", "")) or {}
-    # `prompt` on the wire is what the upsampler wrote -- long, styled, and not
-    # what the viewer typed. The director keeps the original in the group tag,
-    # so the panel shows that and keeps the rewrite for the hover text: a
-    # viewer should recognise their own words in the queue.
+    # `prompt` is the upsampler's rewrite; the group tag keeps what the viewer
+    # actually typed, and that is what the panel shows -- a viewer should
+    # recognise their own words in the queue.
     original = tag.get("raw_prompt") or clip.get("prompt") or ""
     return {
         "clip_id": clip.get("clip_id", ""),
@@ -98,10 +89,9 @@ class DemoState:
         self.stats: dict[str, Any] = {}
         self.chat: deque[dict[str, Any]] = deque(maxlen=CHAT_HISTORY)
         self.connected = False
-        # (wall clock when these frames were emitted, what they are). The page
-        # matches its EXT-X-PROGRAM-DATE-TIME playback position against this
-        # rather than trusting the live `now_playing`, which runs ahead of the
-        # picture by the whole HLS pipeline.
+        # (wall clock, what was playing). The page matches its
+        # EXT-X-PROGRAM-DATE-TIME position against this rather than the live
+        # `now_playing`, which runs a whole HLS pipeline ahead of the picture.
         self.timeline: deque[dict[str, Any]] = deque(maxlen=TIMELINE_ENTRIES)
 
     @property
@@ -131,7 +121,7 @@ class DemoState:
         self.chat.append({"kind": kind, "author": author, "text": text, "at": time.time()})
 
     def on_message(self, kind: str, data: dict[str, Any]) -> None:
-        """Fold one model message into the mirror. Never raises: it runs on the link."""
+        """Fold one engine message into the mirror. Never raises."""
         if kind == "queue_update":
             self.generation = [_clip_view(c) for c in data.get("generation", [])]
             self.playout = [_clip_view(c) for c in data.get("playout", [])]
@@ -152,9 +142,8 @@ class DemoState:
             self.now_playing = _clip_view(data.get("clip", {}))
             self.timeline.append({"at": time.time(), "clip": self.now_playing})
         elif kind == "clip_queued":
-            # One line per group, not per scene: a six-scene story is still one
-            # thing somebody asked for. Viewer submissions are already echoed
-            # by the POST handler, so only filler is announced here.
+            # One line per group, not per scene. Viewer submissions are
+            # already echoed by the POST handler, so only filler lands here.
             clip = _clip_view(data.get("clip", {}))
             scene = clip.get("scene")
             if clip["generated"] and (scene is None or scene == 1):
@@ -181,11 +170,9 @@ class DemoWeb:
         self._host, self._port = host, port
         self._clients: set[WebSocket] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
-        # One writer, never a task per update. Spawning a task per broadcast let
-        # two snapshots race: a client could receive a newer state and then an
-        # older one, and the page would render the stale timeline -- the panel
-        # jumping back a clip and then forward again. The flag also coalesces
-        # bursts into a single send.
+        # One writer, never a task per update: a task per broadcast let two
+        # snapshots race, and a client receiving the older one second saw the
+        # panel jump back a clip. The flag also coalesces bursts.
         self._dirty: asyncio.Event | None = None
         self._send_lock: asyncio.Lock | None = None
         self._seq = 0

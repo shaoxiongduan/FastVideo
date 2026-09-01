@@ -25,7 +25,6 @@ CPU_ONLY_MODULES = (
     "livestream.clip_queue",
     "livestream.config",
     "livestream.group_tag",
-    "livestream.log",
 )
 
 

@@ -1,28 +1,17 @@
-"""Admin chat commands: live control of the stream from trusted chatters.
+"""Admin chat commands: live control of the stream from trusted names.
 
-Admins are the chat usernames listed in `ADMIN_USERS` (comma-separated,
-matched case-insensitively). A bare entry (`name`) matches that username on
-any platform; a scoped entry (`twitch:name`, `youtube:name`) matches it on
-one — use scoping when the same display name could be different people on
-different platforms.
+Admins are the usernames in `ADMIN_USERS`, matched case-insensitively.
 
-Admin commands ride the same chat sources as viewer prompts. The router in
-`main.py` hands every matched command here first, before the director sees
-it, so an admin command never costs a cooldown slot, a moderation call, or
-an LLM call — and a `!prompt` from an admin is still just a prompt. A
-recognized admin command from a non-admin is consumed and logged, never
-treated as a prompt.
+The router in `main.py` offers every matched command here before the director
+sees it, so an admin command costs no cooldown slot, moderation call or LLM
+call -- while a `!prompt` from an admin is still just a prompt. A recognised
+admin command from a non-admin is consumed and logged.
 
-The command set:
-
-  * `!switch <preset>` — swap the creative preset live. The name is resolved
-    against the `presets/` folder at that moment, so dropping a new JSON
-    into the folder makes it switchable with no restart. The upsampler's
-    style and the idle filler's prompt list change immediately, and both
-    model queues are flushed down to one buffer clip
-    (`Director.flush_stale_clips`) so the new identity reaches the stream in
-    about one clip's time instead of draining a whole queue of old-style
-    clips.
+`!switch <preset>` swaps the creative preset live. The name is resolved
+against `presets/` at that moment, so a new JSON dropped in the folder is
+switchable without a restart. Style and idle prompts change immediately, and
+both queues are flushed down to one buffer clip so the new identity reaches
+the stream in about one clip's time rather than after a whole queue drains.
 """
 
 from __future__ import annotations
