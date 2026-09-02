@@ -220,12 +220,13 @@ unmute.addEventListener("click", tryUnmuted);
 
 // Which wall-clock moment is on screen.
 //
-// EXT-X-PROGRAM-DATE-TIME in the playlist is stamped by the same clock the
-// server keys its timeline to, so this is directly comparable -- there is no
-// offset to measure, smooth or subtract back out. An earlier version did
-// measure one, which was both unnecessary and slightly wrong: it compared a
-// freshly-read playback position against the *previous* snapshot's timestamp,
-// so the error sawtoothed with the snapshot interval.
+// The server keys its timeline to EXT-X-PROGRAM-DATE-TIME, so a player that
+// reports the date of the frame it is showing answers this exactly. Not every
+// player does: measured in a real browser, all three ways of asking come back
+// empty -- `hls.playingDate`, the fragment's `programDateTime`, and
+// `getStartDate`. So the exact sources are tried first and a derived one
+// stands behind them; see the block below for how that is built and why it
+// has to be averaged.
 let fragPDT = null, fragStart = null;
 screenTime.source = "none";
 

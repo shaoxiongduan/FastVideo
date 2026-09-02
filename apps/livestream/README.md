@@ -67,7 +67,7 @@ one-line error rather than a loader traceback five minutes in.
 
 ```bash
 uv pip install -e apps/livestream
-cp apps/livestream/.env.example .env      # keys, preset, sink
+cp apps/livestream/.env.example .env      # keys, weights, preset
 livestream-server
 ```
 
@@ -87,6 +87,27 @@ The `gpu` marker covers one test: the assertion that `clip_plan`'s copy of
 MiniMax-H3's packing constants still matches FastVideo's. Importing the
 upstream module needs a live CUDA driver, so run that one whenever the pinned
 FastVideo version moves.
+
+## Keeping the title on the picture
+
+Every viewer sits at a different point in the stream, so the server cannot say
+what is on screen — it can only say which clip occupies which instant, and the
+page has to locate itself. Where a browser reports the date of the frame it is
+showing, that is used directly. Most do not, so the page falls back to the
+live edge the server publishes minus how far behind its own buffer edge it is
+playing, averaged over more than a segment and carried on `currentTime`.
+
+`?debug=1` shows which source answered and how far behind live the viewer is.
+
+## Rate limiting
+
+One prompt per viewer per `CHAT_COOLDOWN_S`. It is answered by `POST /chat`
+itself with a 429 and a `retry_after`, so the sender's page can grey out its
+send box and count down while everyone else's view stays clean — the chat feed
+is shared, and one person's rate-limit is not the room's business.
+
+The real backpressure is the viewer-clip budget: a queue already full of
+viewer content refuses more, which is why the cooldown can be short.
 
 ## Presets
 

@@ -195,9 +195,11 @@ class HlsSink:
     def stream_time(self) -> float | None:
         """The PROGRAM-DATE-TIME a frame handed over now will carry.
 
-        The page locates what is on a viewer's screen by comparing the
-        playlist's PDT against the timeline the web app keeps, so the two have
-        to mean the same instant.
+        The web app stamps its timeline with this, and the page compares its
+        own playback position against those stamps, so the two have to mean the
+        same instant. (Most browsers cannot report a date at all, and the page
+        falls back to `published_until` for those -- but the timeline is keyed
+        this way either way.)
 
         Frame counting is what makes them agree: ffmpeg's output frame 0 is the
         first frame submitted here, so a frame submitted now lands at

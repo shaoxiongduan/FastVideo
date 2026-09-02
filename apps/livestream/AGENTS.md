@@ -45,6 +45,23 @@ frames at its own resolutions.
   `_raise_dynamo_limits` guards against.
 - **`config.py` is the only reader of `os.environ` and the only YAML parser.**
   Keep it that way; everything else takes a `Config`.
+- **Do not compute where a frame will land on the clock — read it.** ffmpeg's
+  PROGRAM-DATE-TIME base was measured at 7.0–8.8 s after the process starts,
+  varying between runs, and is not the encoder settle. `stream_time()` anchors
+  on segment 0 of the playlist ffmpeg itself writes.
+- **Do not assume the browser can report its playback date.** Measured in a
+  real browser, `hls.playingDate`, the fragment's `programDateTime` and
+  `getStartDate` all come back empty. The page derives its position from the
+  live edge minus its distance behind its own buffer edge instead. Both of
+  those step about a segment apart, so their difference is a square wave and
+  has to be averaged over more than a segment and carried on `currentTime`,
+  which is the only smooth quantity available.
+- **A refusal must reach the viewer who caused it, and nobody else.** The chat
+  feed is shared. The cooldown is answered at `POST /chat` with a 429 so the
+  sender's own page can lock its box; anything refused later goes through
+  `Director.on_reject` and is rendered only for the viewer it names. A refusal
+  that only reaches the log is a prompt that silently disappears — which is
+  exactly what shipped once.
 - **There is no runtime control surface.** The preset is fixed at startup, so
   nothing mutates the director's prompt list or the upsampler's style once
   running. Adding live control means re-adding the flush that keeps a switch

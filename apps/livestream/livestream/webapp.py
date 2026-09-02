@@ -15,7 +15,10 @@ Routes:
     GET  /hls/<file>    the playlist and segments (written by `sink.py`)
     GET  /healthz       whether the engine is loaded
     WS   /state         one JSON snapshot on connect, then one per change
-    POST /chat          {"author": str, "text": str} -> a prompt for the director
+    POST /chat          {"author": str, "text": str} -> a prompt for the
+                        director; 429 with `retry_after` when that viewer is
+                        still on cooldown, answered here so the refusal stays
+                        out of the shared chat feed
 """
 
 from __future__ import annotations
