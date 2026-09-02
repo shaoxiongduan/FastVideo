@@ -302,7 +302,7 @@ class Config:
             web_host=os.environ.get("WEB_HOST", "0.0.0.0"),
             web_port=args.port or int(os.environ.get("WEB_PORT", "8081")),
             chat_command=os.environ.get("CHAT_COMMAND", "!prompt").strip(),
-            chat_cooldown_s=float(os.environ.get("CHAT_COOLDOWN_S", "30")),
+            chat_cooldown_s=float(os.environ.get("CHAT_COOLDOWN_S", "10")),
         )
         config.validate()
         return config

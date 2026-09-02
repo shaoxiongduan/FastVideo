@@ -36,7 +36,7 @@ import json
 import logging
 import random
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from .chat import ChatPrompt
 from .group_tag import is_generated, parse_group_tag, pick_next, viewer_insert_position
@@ -66,15 +66,17 @@ class Director:
     """Consume chat prompts; keep the fast-h3 queue fed with scene groups."""
 
     def __init__(
-            self,
-            link: Engine,
-            upsampler: PromptUpsampler,
-            moderator: Moderator,
-            cooldown_s: float,
-            idle_prompts: Sequence[str] = (),
-            idle_queue_target: int = 0,
+        self,
+        link: Engine,
+        upsampler: PromptUpsampler,
+        moderator: Moderator,
+        cooldown_s: float,
+        idle_prompts: Sequence[str] = (),
+        idle_queue_target: int = 0,
+        on_reject: Callable[[str, str], None] | None = None,
     ) -> None:
         self._link = link
+        self._on_reject = on_reject
         self._upsampler = upsampler
         self._moderator = moderator
         self._cooldown_s = cooldown_s
@@ -89,25 +91,47 @@ class Director:
 
     # -------------------------------------------------------- chat intake
 
+    def cooldown_remaining(self, author: str) -> float:
+        """Seconds until *author* may send again; 0 when they may send now.
+
+        Asked by the web app before it accepts a POST, so a rate-limited
+        viewer is stopped in their own browser rather than told afterwards in
+        a chat feed everyone else can read.
+        """
+        last = self._last_accepted.get(author)
+        if last is None:
+            return 0.0
+        return max(0.0, self._cooldown_s - (time.monotonic() - last))
+
+    def _reject(self, prompt: ChatPrompt, reason: str) -> None:
+        """Drop one prompt, and make sure the viewer hears about it.
+
+        Every rejection below used to be log-only, while the web app had
+        already answered the POST with `ok` and echoed the prompt into chat --
+        so a viewer watched their request appear and then quietly die. The
+        component that can say no is downstream of the acknowledgement, which
+        is why it has to report back rather than return a status.
+        """
+        logger.info("[director] dropped from %s@%s (%s): %s", prompt.author, prompt.source, reason, prompt.text)
+        if self._on_reject is None:
+            return
+        try:
+            self._on_reject(prompt.author, reason)
+        except Exception:  # noqa: BLE001 -- telling the viewer must not kill the loop
+            logger.exception("[director] reject callback failed")
+
     def submit(self, prompt: ChatPrompt) -> None:
         """Accept one chat prompt (called synchronously by chat sources)."""
         now = time.monotonic()
         last = self._last_accepted.get(prompt.author)
         if last is not None and now - last < self._cooldown_s:
-            logger.info(
-                "[director] cooldown: dropping prompt from %s (%.0fs left)",
-                prompt.author,
-                self._cooldown_s - (now - last),
-            )
+            self._reject(prompt, f"one prompt every {self._cooldown_s:.0f}s; "
+                         f"{self._cooldown_s - (now - last):.0f}s left")
             return
         try:
             self._pending.put_nowait(prompt)
         except asyncio.QueueFull:
-            logger.warning(
-                "[director] backlog full (%d); dropping prompt from %s",
-                _PENDING_LIMIT,
-                prompt.author,
-            )
+            self._reject(prompt, f"the backlog is full ({_PENDING_LIMIT} waiting)")
             return
         self._last_accepted[prompt.author] = now
         logger.info(
@@ -131,23 +155,13 @@ class Director:
                 # Dropped now, before it costs a moderation and an LLM call.
                 # Capacity comes from the engine, never from a constant.
                 if self._viewer_clips_queued() >= self._link.playout_capacity:
-                    logger.warning(
-                        "[director] %d viewer clips already queued (budget %d); "
-                        "dropping prompt from %s",
-                        self._viewer_clips_queued(),
-                        self._link.playout_capacity,
-                        prompt.author,
-                    )
+                    self._reject(
+                        prompt, f"{self._viewer_clips_queued()} viewer clips already queued "
+                        f"(budget {self._link.playout_capacity})")
                     continue
                 verdict = await self._moderator.review(prompt.text)
                 if verdict is not None:
-                    logger.warning(
-                        "[director] rejected prompt from %s@%s (%s): %s",
-                        prompt.author,
-                        prompt.source,
-                        verdict,
-                        prompt.text,
-                    )
+                    self._reject(prompt, verdict)
                     continue
                 group = await self._upsampler.upsample(
                     raw_prompt=prompt.text,

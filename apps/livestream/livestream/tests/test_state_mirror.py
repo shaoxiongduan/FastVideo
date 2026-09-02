@@ -101,6 +101,46 @@ def test_snapshot_carries_everything_the_page_reads() -> None:
                                       "playout_queued": 2, "playout_capacity": 10, "clips_played": 7,
                                       "width": 1344, "height": 768})
     snap = state.snapshot()
-    assert set(snap) == {"connected", "now_playing", "timeline", "server_now", "generating",
+    assert set(snap) == {"connected", "now_playing", "timeline", "live_edge", "generating",
                          "generation", "playout", "stats", "chat"}
     assert snap["stats"]["clips_played"] == 7
+
+
+def test_timeline_uses_the_stream_clock_not_wall_clock() -> None:
+    """Timeline entries must be stamped in the same clock as the playlist.
+
+    The page locates what is on screen by comparing EXT-X-PROGRAM-DATE-TIME
+    against these timestamps. Wall clock is a fraction of a second early: a
+    frame still has the pacer's buffer and ffmpeg's encoder to cross before it
+    is stamped, so the sink supplies the corrected instant.
+    """
+    state = DemoState()
+    state.stream_clock = lambda: 1000.0
+    state.on_message("clip_started", {"clip": clip("a")})
+    state.on_message("clip_finished", {"clip": clip("a"), "seconds_sent": 14.4})
+    assert [e["at"] for e in state.timeline] == [1000.0, 1000.0]
+
+
+def test_timeline_falls_back_to_wall_clock_before_ffmpeg_starts() -> None:
+    """`stream_time` is None until the first ffmpeg is up; a timestamp is still
+    better than none, and the page has no PDT to compare against yet anyway."""
+    import time as _time
+
+    state = DemoState()
+    state.stream_clock = lambda: None
+    before = _time.time()
+    state.on_message("clip_started", {"clip": clip("a")})
+    assert before <= state.timeline[0]["at"] <= _time.time()
+
+
+def test_snapshot_no_longer_carries_server_now() -> None:
+    """It existed only to drive the client's lag estimate, which is gone."""
+    assert "server_now" not in DemoState().snapshot()
+
+
+def test_live_edge_comes_from_the_sink() -> None:
+    """The page needs it to locate itself when the player exposes no date."""
+    state = DemoState()
+    assert state.snapshot()["live_edge"] is None
+    state.live_edge_clock = lambda: 4321.0
+    assert state.snapshot()["live_edge"] == 4321.0

@@ -94,6 +94,8 @@
   form{display:flex;flex-wrap:wrap;gap:8px;padding:12px;border-top:1px solid var(--line);
        background:var(--panel-2)}
   input,button{font:inherit;border-radius:9px;border:1px solid var(--line)}
+  button:disabled{opacity:.55;cursor:default;box-shadow:none}
+  input:disabled{opacity:.6}
   input{min-width:0;background:var(--panel);color:var(--text);padding:9px 11px}
   input::placeholder{color:#94a3b8}
   input:focus{outline:2px solid var(--accent);outline-offset:-1px}
@@ -106,9 +108,9 @@
   #unmute{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);
           background:var(--accent);color:#fff;font-weight:700;padding:9px 17px;
           border:0;border-radius:99px;cursor:pointer;z-index:5}
-  #debug{position:fixed;right:10px;bottom:10px;z-index:20;background:#0f172ae6;
-         border-radius:8px;padding:6px 9px;font:11px/1.4 ui-monospace,monospace;
-         color:#93c5fd;pointer-events:none}
+  #debug{position:fixed;right:10px;bottom:10px;z-index:20;background:#0f172af2;
+         border-radius:8px;padding:8px 11px;font:11px/1.5 ui-monospace,monospace;
+         color:#93c5fd;pointer-events:none;max-width:46ch}
   @media (max-width:900px){
     /* >=16px stops iOS/Chrome auto-zooming the page on focus. */
     input, #text, #who, button{font-size:16px}
@@ -180,6 +182,16 @@ function startPlayback() {
   if (!window.Hls || !Hls.isSupported()) return;
   const hls = new Hls({ liveSyncDurationCount: 3, lowLatencyMode: true });
   window._hls = hls;
+  // Track the playing fragment ourselves. `hls.playingDate` computes the same
+  // thing, but it is a single getter that can come back null; deriving it from
+  // the fragment the player reports leaves a second, independent source.
+  hls.on(Hls.Events.FRAG_CHANGED, (_e, data) => {
+    const frag = data && data.frag;
+    if (frag && frag.programDateTime) {
+      fragPDT = frag.programDateTime / 1000;
+      fragStart = frag.start;
+    }
+  });
   hls.on(Hls.Events.ERROR, (_e, data) => {
     if (!data.fatal) return;
     hls.destroy();
@@ -206,80 +218,108 @@ async function tryUnmuted() {
 video.addEventListener("loadedmetadata", tryUnmuted, { once: true });
 unmute.addEventListener("click", tryUnmuted);
 
-// How far behind live the picture is, in seconds -- and then, from that, which
-// wall-clock moment is on screen.
+// Which wall-clock moment is on screen.
 //
-// Measuring the absolute position every tick was wrong: the sources disagree by
-// seconds, so switching between them moved the panel early, then late. What is
-// actually stable is the *offset* from live, so that is what gets measured,
-// smoothed, and held. A source is only ever downgraded if the good one stops
-// answering for a while, never tick to tick.
-//
-// Sources, best first:
-//   program-date-time  exact, needs PDT in the playlist and active playback
-//   buffered-edge      measured: play head vs the newest buffered frame
-//   estimate           the pipeline's nominal delay, used only until one of
-//                      the above answers
-const ESTIMATED_LAG_S = 8.0;
-// A segment publishes only once fully encoded, so the newest frame a player can
-// have is already about this old.
-const SEGMENT_PRODUCTION_S = 2.0;
-// Smoothing. Low enough to settle in a few seconds, high enough that a single
-// odd reading cannot jump the panel a whole clip.
-const LAG_SMOOTHING = 0.15;
-// Trust a measured offset for this long before falling back.
-const MEASURE_TTL_MS = 8000;
+// EXT-X-PROGRAM-DATE-TIME in the playlist is stamped by the same clock the
+// server keys its timeline to, so this is directly comparable -- there is no
+// offset to measure, smooth or subtract back out. An earlier version did
+// measure one, which was both unnecessary and slightly wrong: it compared a
+// freshly-read playback position against the *previous* snapshot's timestamp,
+// so the error sawtoothed with the snapshot interval.
+let fragPDT = null, fragStart = null;
+screenTime.source = "none";
 
-let lagSeconds = ESTIMATED_LAG_S;   // smoothed offset from live
-let lagSource = "estimate";
-let lastMeasuredAt = 0;
+// --- the derived position, for browsers that expose no date at all ---------
+// The playlist is fetched here rather than taken from the state socket: the
+// socket pushes on change, so its copy of the live edge can be seconds stale,
+// and staleness in one of the two staircases is what the averaging cannot fix.
+const OFFSET_WINDOW_MS = 12000;   // must span more than one segment
+const OFFSET_SMOOTHING = 0.2;
+const OFFSET_RESET_S = 4.0;       // a jump this large means a seek or a stall
+let liveEdge = null;
+let offsetSamples = [];
+let heldOffset = null;
 
-// One raw reading of how far behind live we are, or null if nothing can say.
-function measureLag(state) {
+async function pollLiveEdge() {
+  try {
+    const text = await (await fetch(PLAYLIST, { cache: "no-store" })).text();
+    let pdt = null, dur = 0;
+    for (const line of text.split("\n")) {
+      if (line.startsWith("#EXT-X-PROGRAM-DATE-TIME:")) pdt = Date.parse(line.slice(25).trim()) / 1000;
+      else if (line.startsWith("#EXTINF:")) dur = parseFloat(line.slice(8));
+    }
+    if (pdt) liveEdge = pdt + dur;
+  } catch (_) { /* a missed poll just means one fewer sample */ }
+}
+setInterval(pollLiveEdge, 2000);
+pollLiveEdge();
+
+function sampleOffset() {
+  if (liveEdge == null || !video.buffered.length || !(video.currentTime > 0)) return;
+  const value = liveEdge - video.buffered.end(video.buffered.length - 1);
+  const now = performance.now();
+  // A seek, a stall or a rebuffer moves the true offset; start over rather
+  // than average across the discontinuity.
+  if (heldOffset != null && Math.abs(value - heldOffset) > OFFSET_RESET_S) {
+    offsetSamples = [];
+    heldOffset = null;
+  }
+  offsetSamples.push({ at: now, value });
+  offsetSamples = offsetSamples.filter((x) => now - x.at <= OFFSET_WINDOW_MS);
+  if (offsetSamples.length < 8 || now - offsetSamples[0].at < OFFSET_WINDOW_MS * 0.5) return;
+  const mean = offsetSamples.reduce((a, x) => a + x.value, 0) / offsetSamples.length;
+  heldOffset = heldOffset == null ? mean : heldOffset + OFFSET_SMOOTHING * (mean - heldOffset);
+}
+
+function screenTime() {
   const hls = window._hls;
-  if (hls && hls.playingDate && state && state.server_now) {
-    return ["program-date-time", state.server_now - hls.playingDate.getTime() / 1000];
+  if (hls && hls.playingDate) {
+    screenTime.source = "playingDate";
+    return hls.playingDate.getTime() / 1000;
   }
-  if (video.buffered && video.buffered.length && video.currentTime > 0) {
-    const behind = video.buffered.end(video.buffered.length - 1) - video.currentTime;
-    if (behind >= 0 && behind < 60) return ["buffered-edge", behind + SEGMENT_PRODUCTION_S];
+  if (fragPDT != null && video.currentTime > 0) {
+    screenTime.source = "fragment";
+    return fragPDT + (video.currentTime - fragStart);
   }
-  if (typeof video.getStartDate === "function" && state && state.server_now) {
-    const s = video.getStartDate();
-    if (s && !isNaN(s.getTime()) && video.currentTime > 0) {
-      return ["start-date", state.server_now - (s.getTime() / 1000 + video.currentTime)];
+  // Safari plays HLS natively, without hls.js; getStartDate() is its PDT.
+  if (typeof video.getStartDate === "function" && video.currentTime > 0) {
+    const start = video.getStartDate();
+    if (start && !isNaN(start.getTime())) {
+      screenTime.source = "startDate";
+      return start.getTime() / 1000 + video.currentTime;
     }
   }
+  // No date from the player at all -- some browsers expose none of the three.
+  // Derived instead: the playlist says where the live edge is, the video says
+  // how far behind its own buffer edge it is playing, and the difference is
+  // the answer.
+  //
+  // Both of those are staircases that step about a segment apart in time, so
+  // their difference is a square wave of roughly a segment's amplitude. Using
+  // it directly made the title flip back and forth whenever the true position
+  // sat near a clip boundary. currentTime is smooth and advances at exactly
+  // 1 s/s, so the offset is averaged over more than a segment and carried on
+  // currentTime, which turns a square wave into a straight line.
+  if (heldOffset != null && video.currentTime > 0) {
+    screenTime.source = "buffer-edge";
+    return video.currentTime + heldOffset;
+  }
+  screenTime.source = "none";
   return null;
 }
 
-function playbackEpoch(state) {
-  if (!state || !state.server_now) return null;
-  const reading = measureLag(state);
-  if (reading) {
-    const [src, raw] = reading;
-    if (raw >= 0 && raw < 120) {
-      // First real reading replaces the guess outright; after that, smooth.
-      lagSeconds = (lagSource === "estimate")
-        ? raw
-        : lagSeconds + LAG_SMOOTHING * (raw - lagSeconds);
-      lagSource = src;
-      lastMeasuredAt = performance.now();
-    }
-  } else if (lagSource !== "estimate" && performance.now() - lastMeasuredAt > MEASURE_TTL_MS) {
-    // The good source has gone quiet for a while; keep its last offset rather
-    // than snapping back to the nominal one, which would jolt the panel.
-    lagSource = lagSource + " (stale)";
-  }
-  // server_now is from the last snapshot; keep the clock running between them.
-  const now = state.server_now + (performance.now() - lastStateAt) / 1000;
-  return now - lagSeconds;
-}
+// Used only when nothing above can say where the viewer is. Falling through to
+// the live clip would be the worst possible answer -- that is the one the
+// engine just started, a whole pipeline ahead of the picture -- so step back
+// from the newest entry by roughly the pipeline's depth instead. Expressed in
+// the timeline's own units, so it needs no client clock.
+const NOMINAL_LAG_S = 8.0;
 
 // The timeline entry covering the moment on screen.
 function playingNow(state) {
-  const at = playbackEpoch(state);
-  if (at == null || !state.timeline || !state.timeline.length) return state.now_playing;
+  if (!state.timeline || !state.timeline.length) return state.now_playing;
+  let at = screenTime();
+  if (at == null) at = state.timeline[state.timeline.length - 1].at - NOMINAL_LAG_S;
   let current = null, found = false;
   for (const entry of state.timeline) {
     if (entry.at <= at) { current = entry.clip; found = true; } else break;
@@ -350,10 +390,14 @@ function renderChat(state) {
     return;
   }
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+  const me = (el("who").value.trim() || "viewer");
   list.innerHTML = state.chat.map(m => {
     if (m.kind === "viewer" || m.kind === "filler") {
       return `<div class="msg ${esc(m.kind)}"><span class="who">${esc(m.author)}</span> ${esc(short(m.text, 110))}</div>`;
     }
+    // An error addressed to one viewer is that viewer's business; the feed is
+    // shared, so everyone else is spared it.
+    if (m.kind === "error" && m.author && m.author !== me) return "";
     return `<div class="msg ${esc(m.kind)}">${esc(m.text)}</div>`;
   }).join("");
   if (atBottom) list.scrollTop = list.scrollHeight;
@@ -376,7 +420,6 @@ function render(state) {
     if (np.scene && np.scenes > 1) bits.push(`scene ${np.scene}/${np.scenes}`);
     if (np.seconds) bits.push(np.seconds.toFixed(1) + "s");
     el("np-meta").textContent = bits.join(" · ");
-    el("np-meta").title = `sync: ${lagSource} · ${lagSeconds.toFixed(1)}s behind live`;
   } else {
     el("np-title").textContent = "Nothing playing yet";
     el("np-meta").textContent = "The stream holds on black between clips.";
@@ -394,7 +437,6 @@ function render(state) {
 
 // One socket, reconnecting forever: the page outlives any single connection.
 let lastState = null;
-let lastStateAt = performance.now();
 let lastSeq = -1;
 
 function connect() {
@@ -407,25 +449,48 @@ function connect() {
       // clip; drop it rather than render it.
       if (typeof next.seq === "number" && next.seq <= lastSeq) return;
       if (typeof next.seq === "number") lastSeq = next.seq;
-      lastState = next; lastStateAt = performance.now(); render(lastState);
+      lastState = next; render(lastState);
     } catch (_) {}
   };
   socket.onclose = () => { lastSeq = -1; el("livetext").textContent = "reconnecting"; setTimeout(connect, 2000); };
 }
 connect();
 // Twice a second is well under a clip length and costs nothing; it is what
-// makes the panel flip exactly when the video does.
-setInterval(() => { if (lastState) render(lastState); }, 500);
+// makes the panel flip exactly when the video does. The offset is sampled on
+// the same tick, so its window fills whether or not state is arriving.
+setInterval(() => { sampleOffset(); if (lastState) render(lastState); }, 500);
 
-// ?debug=1 shows how the panel is being synced, on screen.
+// ?debug=1 shows how the panel is being synced, on screen. If the title looks
+// wrong, this says which of the three position sources answered and how far
+// behind live the viewer actually is.
 const DEBUG = new URLSearchParams(location.search).has("debug");
 if (DEBUG) {
   const box = el("debug");
   box.hidden = false;
   setInterval(() => {
-    const t = lastState && lastState.timeline ? lastState.timeline.length : 0;
-    box.textContent = `sync ${lagSource} | ${lagSeconds.toFixed(1)}s behind`
-      + ` | ct ${(video.currentTime||0).toFixed(1)} | tl ${t} | seq ${lastSeq}`;
+    const s = lastState;
+    if (!s) { box.textContent = "no state"; return; }
+    const at = screenTime();
+    const newest = (s.timeline && s.timeline.length) ? s.timeline[s.timeline.length - 1].at : null;
+    const behind = (at != null && newest != null) ? (newest - at) : null;
+    const shown = playingNow(s);
+    const live = s.now_playing;
+    const h = window._hls;
+    const buf = video.buffered.length
+      ? (video.buffered.end(video.buffered.length - 1) - video.currentTime).toFixed(1) + "s"
+      : "none";
+    box.innerHTML = [
+      `src <b>${screenTime.source}</b>` + (at == null ? " (NO POSITION)" : ""),
+      `behind live ${behind == null ? "?" : behind.toFixed(1) + "s"}   behind buf ${buf}`,
+      `hls ${h ? "yes" : "no"}  pd ${h && h.playingDate ? "yes" : "no"}` +
+        `  frag ${fragPDT ? "yes" : "no"}  gsd ${typeof video.getStartDate === "function" ? "yes" : "no"}`,
+      `edge ${liveEdge ? "yes" : "MISSING"}  off ${heldOffset == null ? "-" : heldOffset.toFixed(2)}` +
+        `  n ${offsetSamples.length}`,
+      `ct ${(video.currentTime || 0).toFixed(1)}  rs ${video.readyState}` +
+        `  tl ${s.timeline ? s.timeline.length : 0}`,
+      `showing: ${shown ? short(label(shown), 32) : "-"}`,
+      `live:    ${live ? short(label(live), 32) : "-"}`,
+    ].join("<br>");
   }, 500);
 }
 
@@ -437,22 +502,59 @@ document.getElementById("queue-head").addEventListener("click",
   () => queueCard.classList.toggle("collapsed"));
 
 // ---------------------------------------------------------------- chat box
-const saved = localStorage.getItem("fasth3-name");
-if (saved) el("who").value = saved;
+// A per-browser default name. Everyone used to fall back to the literal
+// "viewer", which put every anonymous viewer in one cooldown bucket -- two
+// people typing meant one of them was silently rate-limited by the other.
+let saved = localStorage.getItem("fasth3-name");
+if (!saved) {
+  saved = "viewer-" + Math.random().toString(36).slice(2, 6);
+  try { localStorage.setItem("fasth3-name", saved); } catch (_) {}
+}
+el("who").value = saved;
+
+// The send box locks itself while this viewer is on cooldown. Doing it here,
+// rather than reporting a refusal into the chat feed, keeps one person's
+// rate-limit out of everybody else's view -- the feed is shared.
+const sendButton = el("chat-form").querySelector("button");
+const sendLabel = sendButton.textContent;
+let cooldownUntil = 0;
+
+function refreshSendState() {
+  const left = Math.ceil((cooldownUntil - Date.now()) / 1000);
+  if (left > 0) {
+    sendButton.disabled = true;
+    el("text").disabled = true;
+    sendButton.textContent = left + "s";
+  } else if (sendButton.disabled) {
+    sendButton.disabled = false;
+    el("text").disabled = false;
+    sendButton.textContent = sendLabel;
+  }
+}
+setInterval(refreshSendState, 250);
 
 el("chat-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (Date.now() < cooldownUntil) return;
   const author = el("who").value.trim() || "viewer";
   const text = el("text").value.trim();
   if (!text) return;
   localStorage.setItem("fasth3-name", author);
+  const previous = text;
   el("text").value = "";
   try {
-    await fetch("/chat", {
+    const res = await fetch("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ author, text }),
     });
+    if (res.status === 429) {
+      // Rate-limited: keep what they typed, and lock the box until it lifts.
+      const body = await res.json().catch(() => ({}));
+      cooldownUntil = Date.now() + (body.retry_after || 5) * 1000;
+      el("text").value = previous;
+      refreshSendState();
+    }
   } catch (_) { /* the socket's next snapshot tells the real story */ }
 });
 </script>

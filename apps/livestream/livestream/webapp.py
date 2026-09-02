@@ -25,6 +25,7 @@ import json
 import logging
 import time
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,15 @@ class DemoState:
         # EXT-X-PROGRAM-DATE-TIME position against this rather than the live
         # `now_playing`, which runs a whole HLS pipeline ahead of the picture.
         self.timeline: deque[dict[str, Any]] = deque(maxlen=TIMELINE_ENTRIES)
+        # Supplied by the web app: the PROGRAM-DATE-TIME a frame handed to the
+        # sink now will carry. The page compares the playlist's PDT against
+        # these timestamps, so they have to be the same clock; wall clock alone
+        # is a tenth of a second early.
+        self.stream_clock: Callable[[], float | None] = lambda: None
+        # The date of the newest frame a player can have. The page subtracts
+        # its own distance behind its buffer edge from this to locate itself,
+        # which works in browsers that expose no PROGRAM-DATE-TIME at all.
+        self.live_edge_clock: Callable[[], float | None] = lambda: None
 
     @property
     def generating(self) -> dict[str, Any] | None:
@@ -109,13 +119,17 @@ class DemoState:
             "connected": self.connected,
             "now_playing": self.now_playing,
             "timeline": list(self.timeline),
-            "server_now": time.time(),
+            "live_edge": self.live_edge_clock(),
             "generating": self.generating,
             "generation": self.generation,
             "playout": self.playout,
             "stats": self.stats,
             "chat": list(self.chat),
         }
+
+    def _now(self) -> float:
+        """When frames emitted at this moment will be stamped in the playlist."""
+        return self.stream_clock() or time.time()
 
     def note(self, kind: str, text: str, author: str = "") -> None:
         self.chat.append({"kind": kind, "author": author, "text": text, "at": time.time()})
@@ -140,7 +154,7 @@ class DemoState:
                 self.now_playing = None
         elif kind == "clip_started":
             self.now_playing = _clip_view(data.get("clip", {}))
-            self.timeline.append({"at": time.time(), "clip": self.now_playing})
+            self.timeline.append({"at": self._now(), "clip": self.now_playing})
         elif kind == "clip_queued":
             # One line per group, not per scene. Viewer submissions are
             # already echoed by the POST handler, so only filler lands here.
@@ -152,7 +166,7 @@ class DemoState:
             self.now_playing = None
             # A gap is part of the timeline too, or the panel would keep naming
             # a clip that has already ended for the viewer.
-            self.timeline.append({"at": time.time(), "clip": None})
+            self.timeline.append({"at": self._now(), "clip": None})
         elif kind == "clip_failed":
             # Failures stay: a viewer whose request vanished deserves to know.
             clip = _clip_view(data.get("clip", {}))
@@ -163,11 +177,25 @@ class DemoState:
 class DemoWeb:
     """The web server: the page, the HLS files, the state socket, the chat box."""
 
-    def __init__(self, chat: WebChat, hls_dir: Path | str, *, host: str = "0.0.0.0", port: int = 8081) -> None:
+    def __init__(self,
+                 chat: WebChat,
+                 hls_dir: Path | str,
+                 *,
+                 host: str = "0.0.0.0",
+                 port: int = 8081,
+                 stream_clock: Callable[[], float | None] | None = None,
+                 live_edge_clock: Callable[[], float | None] | None = None) -> None:
         self.state = DemoState()
+        if stream_clock is not None:
+            self.state.stream_clock = stream_clock
+        if live_edge_clock is not None:
+            self.state.live_edge_clock = live_edge_clock
         self._chat = chat
         self._hls_dir = Path(hls_dir)
         self._host, self._port = host, port
+        # Set by `main.py` once the director exists; until then nothing is
+        # rate-limited, which is the right default for a page with no engine.
+        self.cooldown_remaining: Callable[[str], float] = lambda author: 0.0
         self._clients: set[WebSocket] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         # One writer, never a task per update: a task per broadcast let two
@@ -249,6 +277,13 @@ class DemoWeb:
             text = str(body.get("text") or "")[:800]
             if not text.strip():
                 return JSONResponse({"ok": False, "error": "empty"}, status_code=400)
+            # Answered here rather than downstream: the chat feed is shared, so
+            # rate-limiting somebody in it would put their business in front of
+            # every other viewer. The sender is told privately, in the reply to
+            # their own request, and their page stops them from sending.
+            wait = self.cooldown_remaining(author)
+            if wait > 0:
+                return JSONResponse({"ok": False, "error": "cooldown", "retry_after": round(wait, 1)}, status_code=429)
             accepted = self._chat.submit(author, text)
             self.state.note("viewer" if accepted else "error",
                             text if accepted else f"dropped (queue full): {text[:80]}",

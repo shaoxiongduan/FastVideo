@@ -69,6 +69,28 @@ async def serve(config: Config) -> None:
     )
     if not moderator.enabled:
         logger.warning("moderation is DISABLED — every chat prompt reaches the upsampler unchecked")
+    # Viewers type into the same page they watch on, so the chat source and the
+    # web app are two halves of one thing -- and the web app is built before the
+    # director, because the director has to be able to tell a viewer that their
+    # prompt was dropped.
+    chat = WebChat(config.chat_command)
+    sink = HlsSink(config.hls_dir, video_bitrate_k=config.video_bitrate_k)
+    # The page positions the now-playing title by comparing the playlist's
+    # PROGRAM-DATE-TIME against the timeline the web app keeps, so the two have
+    # to be stamped by the same clock: the sink's.
+    web = DemoWeb(chat,
+                  config.hls_dir,
+                  host=config.web_host,
+                  port=config.web_port,
+                  stream_clock=sink.stream_time,
+                  live_edge_clock=sink.published_until)
+    engine.add_listener(web.listener)
+
+    def announce_reject(author: str, reason: str) -> None:
+        """Put a dropped prompt back in front of the viewer who sent it."""
+        web.state.note("error", f"not queued -- {reason}", author=author)
+        web.broadcast()
+
     director = Director(
         engine,
         upsampler,
@@ -76,14 +98,9 @@ async def serve(config: Config) -> None:
         cooldown_s=config.chat_cooldown_s,
         idle_prompts=config.idle_prompts,
         idle_queue_target=config.idle_queue_target,
+        on_reject=announce_reject,
     )
-    # Viewers type into the same page they watch on, so the chat source and the
-    # web app are two halves of one thing.
-    chat = WebChat(config.chat_command)
-    web = DemoWeb(chat, config.hls_dir, host=config.web_host, port=config.web_port)
-    engine.add_listener(web.listener)
-
-    sink = HlsSink(config.hls_dir, video_bitrate_k=config.video_bitrate_k)
+    web.cooldown_remaining = director.cooldown_remaining
     # The canvas is this deployment's own config rather than something
     # negotiated with a remote, so the pacer can start immediately.
     width, height = engine.canvas

@@ -39,6 +39,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import IO
 
@@ -174,6 +175,14 @@ class HlsSink:
         self._failures = 0
         self._last_start_attempt = 0.0
         self._frames_sent = 0
+        # Wall clock ffmpeg gave output frame 0, read back from the playlist it
+        # writes, and the frames submitted since. Together they give the
+        # PROGRAM-DATE-TIME a frame entering now will carry -- see
+        # `stream_time`. Not predictable: measured at 8.8 s after the process
+        # starts and 6.8 s after its first frame, so it has to be read.
+        self._pdt_base: float | None = None
+        self._pdt_base_checked = 0.0
+        self._stream_frames = 0
         self._dead = False
         self._video_shed = 0
         self._audio_shed = 0
@@ -182,6 +191,60 @@ class HlsSink:
     def playlist_path(self) -> Path:
         """Where the web app points the player."""
         return self._directory / self._playlist_name
+
+    def stream_time(self) -> float | None:
+        """The PROGRAM-DATE-TIME a frame handed over now will carry.
+
+        The page locates what is on a viewer's screen by comparing the
+        playlist's PDT against the timeline the web app keeps, so the two have
+        to mean the same instant.
+
+        Frame counting is what makes them agree: ffmpeg's output frame 0 is the
+        first frame submitted here, so a frame submitted now lands at
+        `base + n / fps`. The base is *read* from ffmpeg rather than computed,
+        because the offset between starting the process and the date it stamps
+        is not something the caller can know -- measured at 8.8 s here, against
+        a 2 s encoder settle.
+
+        None until the first segment is published, when there is no PDT to be
+        positioned against anyway.
+        """
+        if self._video is None:
+            return None
+        if self._pdt_base is None:
+            self._learn_pdt_base()
+            if self._pdt_base is None:
+                return None
+        return self._pdt_base + self._stream_frames / self._video.fps
+
+    def _learn_pdt_base(self) -> None:
+        """Read the wall clock ffmpeg gave output frame 0, from its playlist.
+
+        Segment `n` starts one nominal segment-length after segment `n-1`, so
+        the base is the first date in the playlist wound back by the media
+        sequence. Read once per ffmpeg and as early as possible: segments that
+        have already rolled off can only be accounted for at their nominal
+        length, and a live one occasionally runs long.
+        """
+        now = time.monotonic()
+        if now - self._pdt_base_checked < 1.0:
+            return
+        self._pdt_base_checked = now
+        try:
+            text = self.playlist_path.read_text()
+        except OSError:
+            return
+        sequence, first = 0, None
+        for line in text.splitlines():
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                sequence = int(line.split(":", 1)[1])
+            elif line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+                first = datetime.fromisoformat(line.split(":", 1)[1].strip()).timestamp()
+                break
+        if first is None:
+            return
+        self._pdt_base = first - sequence * SEGMENT_SECONDS
+        logger.info("[sink] stream clock anchored at %.3f (from segment %d)", self._pdt_base, sequence)
 
     # ------------------------------------------------------------ lifecycle
 
@@ -306,6 +369,10 @@ class HlsSink:
         self._audio_writer.attach(audio_pipe)
 
         threading.Thread(target=self._drain_stderr, args=(self._process, ), daemon=True, name="sink-stderr").start()
+        # The clock re-anchors from the new playlist, which this spawn wiped.
+        self._pdt_base = None
+        self._pdt_base_checked = 0.0
+        self._stream_frames = 0
         logger.info("[sink] ffmpeg started: %dx%d@%dfps -> %s", video.width, video.height, video.fps,
                     self.playlist_path)
 
@@ -372,17 +439,53 @@ class HlsSink:
             return
         if not frame.flags["C_CONTIGUOUS"]:
             frame = np.ascontiguousarray(frame)
+        if self._pdt_base is None:
+            # Anchor as early as the first segment allows: the base is wound
+            # back from the newest date by the media sequence at a nominal
+            # segment length, and a live segment occasionally runs long, so a
+            # long wind-back accumulates error. Self-throttled, and this stops
+            # touching the disk entirely once anchored.
+            self._learn_pdt_base()
         self._video_shed += self._video_writer.submit(frame.tobytes())
         self._frames_sent += 1
+        self._stream_frames += 1
         if self._frames_sent % (video.fps * 60) == 0:
             logger.info(
-                "[sink] %d frames sent (dropped: %d video / %d audio; net A/V skew %+.3fs)",
+                "[sink] %d frames sent (dropped: %d video / %d audio; net A/V skew %+.3fs; "
+                "queue %d; clock %+.2fs vs playlist)",
                 self._frames_sent,
                 self._video_writer.dropped,
                 self._audio_writer.dropped if self._audio_writer else 0,
                 # What ffmpeg's byte-counted PTS is out by. Zero is the point.
                 (self._video_shed - self._audio_shed) / video.fps,
+                self._video_writer.queue.qsize(),
+                self._clock_drift(),
             )
+
+    def published_until(self) -> float | None:
+        """The date of the newest frame a player can actually have.
+
+        A viewer's position cannot be read back from every browser -- the
+        PROGRAM-DATE-TIME APIs are inconsistent and some expose nothing -- so
+        the page needs a second way to locate itself: this, minus how far the
+        viewer is behind their own buffer edge, puts them on the same clock
+        without asking the player for a date at all.
+        """
+        try:
+            newest, span = 0.0, 0.0
+            for line in self.playlist_path.read_text().splitlines():
+                if line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+                    newest = datetime.fromisoformat(line.split(":", 1)[1].strip()).timestamp()
+                elif line.startswith("#EXTINF:"):
+                    span = float(line.split(":", 1)[1].rstrip(","))
+            return (newest + span) if newest else None
+        except OSError:
+            return None
+
+    def _clock_drift(self) -> float:
+        """How far `stream_time` sits ahead of the published video, for the log."""
+        published, now = self.published_until(), self.stream_time()
+        return (now - published) if (now and published) else 0.0
 
     def send_audio(self, samples: np.ndarray) -> None:
         # Gated exactly like send_video: audio written while video is withheld
