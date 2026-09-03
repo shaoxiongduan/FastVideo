@@ -45,7 +45,7 @@ from typing import IO
 
 import numpy as np
 
-logger = logging.getLogger("livestream.sink")
+logger = logging.getLogger("infinite_livestream.sink")
 
 _RESTART_COOLDOWN_S = 2.0
 _MAX_CONSECUTIVE_FAILURES = 5

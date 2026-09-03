@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-logger = logging.getLogger("livestream.chat")
+logger = logging.getLogger("infinite_livestream.chat")
 
 # Small on purpose: a deep queue would let a burst of typing commit the stream
 # to minutes of stale prompts.

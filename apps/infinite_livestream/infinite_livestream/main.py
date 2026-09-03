@@ -1,4 +1,4 @@
-"""Chat-driven FastH3 livestream: one process, from prompt to playlist.
+"""Infinite Livestream: one process, from prompt to playlist.
 
   chat ──▶ Director ──▶ PromptUpsampler (any OpenAI-compatible LLM)
               │
@@ -16,8 +16,8 @@ connection.
 
 Usage:
     export OPENAI_API_KEY=... LIVESTREAM_WEIGHTS_PATH=/path/to/fasth3
-    livestream-server                       # configs/livestream.yaml
-    livestream-server --config my.yaml      # or a copy of it
+    infinite-livestream-server                       # configs/infinite_livestream.yaml
+    infinite-livestream-server --config my.yaml      # or a copy of it
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from .sink import AudioFormat, HlsSink, VideoFormat
 from .upsampler import PromptUpsampler
 from .webapp import DemoWeb
 
-logger = logging.getLogger("livestream")
+logger = logging.getLogger("infinite_livestream")
 
 
 def setup_logging() -> None:

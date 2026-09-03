@@ -11,8 +11,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from livestream.chat import WebChat
-from livestream.webapp import DemoWeb
+from infinite_livestream.chat import WebChat
+from infinite_livestream.webapp import DemoWeb
 
 
 @pytest.fixture()

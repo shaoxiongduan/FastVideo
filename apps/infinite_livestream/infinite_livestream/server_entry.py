@@ -11,15 +11,15 @@ from __future__ import annotations
 
 def cli() -> None:
     try:
-        from livestream.main import cli as main_cli
+        from infinite_livestream.main import cli as main_cli
     except ModuleNotFoundError as exc:
         if exc.name in {"fastvideo", "torch", "torchaudio", "transformers"}:
-            raise SystemExit("livestream-server requires FastVideo runtime deps. Install "
-                             "`fastvideo[livestream]` or run `uv sync --extra livestream` "
+            raise SystemExit("infinite-livestream-server requires FastVideo runtime deps. Install "
+                             "`fastvideo[livestream]` or run `uv sync --extra infinite-livestream` "
                              "from the FastVideo checkout.") from exc
         if exc.name in {"fastapi", "uvicorn", "openai", "dotenv"}:
-            raise SystemExit(f"livestream-server requires the `{exc.name}` package; install "
-                             "the app's dependencies (`uv pip install -e apps/livestream`).") from exc
+            raise SystemExit(f"infinite-livestream-server requires the `{exc.name}` package; install "
+                             "the app's dependencies (`uv pip install -e apps/infinite_livestream`).") from exc
         raise
 
     main_cli()

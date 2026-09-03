@@ -1,4 +1,4 @@
-# Everything the livestream app is configured with, apart from secrets.
+# Everything Infinite Livestream is configured with, apart from secrets.
 #
 # API keys stay in the environment, because a key in a version-controlled file
 # is a key that leaks:
@@ -6,7 +6,7 @@
 #   export OPENAI_API_KEY=...
 #   export LIVESTREAM_WEIGHTS_PATH=/path/to/fasth3
 #
-# Point the app at a copy of this file with `livestream-server --config`.
+# Point the app at a copy of this file with `infinite-livestream-server --config`.
 
 inference:
   # The canvas every clip is generated at. 16:9 resolves to 1344x768.

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from livestream import clip_plan
+from infinite_livestream import clip_plan
 
 
 @pytest.mark.gpu

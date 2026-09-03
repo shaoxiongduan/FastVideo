@@ -1,6 +1,6 @@
 """Configuration: one YAML file, plus secrets from the environment.
 
-`configs/livestream.yaml` holds everything the app is configured with: what the
+`configs/infinite_livestream.yaml` holds everything the app is configured with: what the
 checkpoint is asked for, how it is hosted, and how the deployment behaves.
 Point at a copy of it with `--config`.
 
@@ -32,7 +32,7 @@ class PresetError(ValueError):
     """A preset file is missing or malformed."""
 
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "livestream.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "infinite_livestream.yaml"
 
 # Where the playlist goes when the config does not say. A relative default
 # would write into whatever directory the server was started from, which for a

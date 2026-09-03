@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from .chat import WebChat
 from .group_tag import parse_group_tag
 
-logger = logging.getLogger("livestream.webapp")
+logger = logging.getLogger("infinite_livestream.webapp")
 
 WEB_DIR = Path(__file__).parent / "web"
 # Chat lines kept for late joiners. The panel is a live feed, not a log: enough

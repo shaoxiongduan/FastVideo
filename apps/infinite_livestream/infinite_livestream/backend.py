@@ -22,7 +22,7 @@ from typing import Any
 from . import clip_plan
 from .config import ModelConfig
 
-logger = logging.getLogger("livestream.backend")
+logger = logging.getLogger("infinite_livestream.backend")
 
 FRAME_RATE = clip_plan.FPS
 

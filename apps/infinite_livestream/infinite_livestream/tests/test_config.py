@@ -13,7 +13,7 @@ import textwrap
 
 import pytest
 
-from livestream.config import Config, PresetError, load_model_config, load_preset
+from infinite_livestream.config import Config, PresetError, load_model_config, load_preset
 
 
 @pytest.fixture()
@@ -23,7 +23,7 @@ def workspace(tmp_path, monkeypatch):
     fillers.mkdir()
     (fillers / "fillers.json").write_text(
         json.dumps({"style": "house style", "idle_prompts": ["a lighthouse", "a seagull"]}))
-    config = tmp_path / "livestream.yaml"
+    config = tmp_path / "infinite_livestream.yaml"
     config.write_text(
         textwrap.dedent(f"""
         inference:
@@ -141,7 +141,7 @@ def test_the_playlist_default_is_not_the_working_directory(tmp_path, monkeypatch
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     import importlib
 
-    from livestream import config as config_module
+    from infinite_livestream import config as config_module
     importlib.reload(config_module)
     hls_dir = config_module.Config.load(["--config", str(config_file)]).hls_dir
     assert hls_dir.startswith(str(tmp_path / "state")), hls_dir

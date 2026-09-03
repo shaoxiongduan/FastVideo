@@ -1,5 +1,5 @@
 [project]
-name = "livestream"
+name = "infinite-livestream"
 version = "0.1.0"
 description = "Chat-driven FastH3 infinite livestream: prompts in, continuous broadcast out."
 readme = "README.md"
@@ -19,7 +19,7 @@ test = [
 ]
 
 [project.scripts]
-livestream-server = "livestream.server_entry:cli"
+infinite-livestream-server = "infinite_livestream.server_entry:cli"
 
 [tool.uv]
 package = false

@@ -9,7 +9,7 @@ with the picture.
 
 from __future__ import annotations
 
-from livestream.webapp import DemoState
+from infinite_livestream.webapp import DemoState
 
 
 def clip(clip_id: str = "abcdef123456", prompt: str = "a lighthouse keeper", *, generated: bool = False,

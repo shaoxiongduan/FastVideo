@@ -1,12 +1,12 @@
-# Livestream
+# Infinite Livestream
 
-Livestream is a chat-driven FastH3 broadcast. Viewers type prompts into a web
+Infinite Livestream is a chat-driven FastH3 broadcast. Viewers type prompts into a web
 page, the app rewrites them with an LLM, generates clips with FastVideo, and
 plays them back as one continuous HLS stream on that same page. When nobody is
 typing it feeds itself from a preset of idle prompts, so the channel never goes
 dark.
 
-It lives in this monorepo under `apps/livestream/`.
+It lives in this monorepo under `apps/infinite_livestream/`.
 
 ```
 chat -> Director -> PromptUpsampler (OpenAI-compatible LLM)
@@ -27,7 +27,7 @@ pointing a tunnel or reverse proxy at one port.
 - FastH3 weights. Set `LIVESTREAM_WEIGHTS_PATH` to the model directory. It
   needs `transformer`, `text_encoder`, `tokenizer`, `processor`, `vae`,
   `audio_vae`, `scheduler`, `audio_scheduler` and `modular_model_index.json`.
-- GPUs for the generator. `configs/livestream.yaml` ships `num_gpus: 4`;
+- GPUs for the generator. `configs/infinite_livestream.yaml` ships `num_gpus: 4`;
   the count must divide the model's attention head count.
 - An API key for an OpenAI-compatible endpoint. Prompt rewriting is on the
   path for the idle filler too, so the stream does not run without one.
@@ -38,7 +38,7 @@ pointing a tunnel or reverse proxy at one port.
 From a FastVideo source checkout:
 
 ```bash
-uv pip install -e apps/livestream
+uv pip install -e apps/infinite_livestream
 ```
 
 The app needs the FastVideo runtime extras (torch, `fastvideo-kernel` with the
@@ -49,7 +49,7 @@ Blackwell VSA extension, and flash-attn-4), plus `ffmpeg` on `PATH`.
 ```bash
 export OPENAI_API_KEY=...
 export LIVESTREAM_WEIGHTS_PATH=/path/to/fasth3
-livestream-server
+infinite-livestream-server
 ```
 
 The page and the HLS stream come up immediately on the configured port. The
@@ -59,11 +59,11 @@ minutes, most of it weight loading and the compile warm-up.
 
 ## Configuration
 
-`configs/livestream.yaml` holds everything the app is configured with. Copy it
+`configs/infinite_livestream.yaml` holds everything the app is configured with. Copy it
 and pass your own with `--config`:
 
 ```bash
-livestream-server --config my-livestream.yaml
+infinite-livestream-server --config my-config.yaml
 ```
 
 | Block | Contents |
@@ -104,7 +104,7 @@ odd-length clip.
 |---|---|
 | `GET /` | The watch page. |
 | `GET /assets/<file>` | Logo and favicon. |
-| `GET /hls/<file>` | Playlist and segments, written by `livestream/sink.py`. |
+| `GET /hls/<file>` | Playlist and segments, written by `infinite_livestream/sink.py`. |
 | `GET /healthz` | `{"connected": bool}`, true once the model is loaded. |
 | `WS /state` | One JSON snapshot on connect, then one per change. |
 | `POST /chat` | `{"author": str, "text": str}`. Returns 429 with `retry_after` when that viewer is still on cooldown. |
@@ -117,7 +117,7 @@ by every viewer, so refusals are kept out of it.
 
 When nobody is typing, the stream keeps itself fed from a list of prompts.
 `director.fillers` names the directory holding `fillers.json`, and defaults to
-the one that ships in `livestream/presets/`.
+the one that ships in `infinite_livestream/presets/`.
 
 ```json
 {
@@ -147,10 +147,10 @@ Append `?debug=1` to the page URL to see which source answered.
 ## Tests
 
 ```bash
-pytest apps/livestream/livestream/tests -m "not gpu"
+pytest apps/infinite_livestream/infinite_livestream/tests -m "not gpu"
 ```
 
-One test is marked `gpu`. It checks that `livestream/clip_plan.py`'s copy of
+One test is marked `gpu`. It checks that `infinite_livestream/clip_plan.py`'s copy of
 MiniMax-H3's packing constants still matches FastVideo's, and importing the
 upstream module needs a live CUDA driver. Run it when the pinned FastVideo
 version moves.

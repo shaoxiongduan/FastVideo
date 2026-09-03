@@ -17,8 +17,8 @@ from typing import Any, cast
 
 import pytest
 
-from livestream.chat import ChatPrompt
-from livestream.director import Director
+from infinite_livestream.chat import ChatPrompt
+from infinite_livestream.director import Director
 
 
 class FakeEngine:

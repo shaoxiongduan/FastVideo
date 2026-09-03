@@ -21,10 +21,10 @@ PACKAGE = pathlib.Path(__file__).resolve().parents[1]
 # and queue logic is pure Python so it can be tested anywhere, and the entry
 # point has to be able to print a dependency error rather than raise one.
 CPU_ONLY_MODULES = (
-    "livestream.clip_plan",
-    "livestream.clip_queue",
-    "livestream.config",
-    "livestream.group_tag",
+    "infinite_livestream.clip_plan",
+    "infinite_livestream.clip_queue",
+    "infinite_livestream.config",
+    "infinite_livestream.group_tag",
 )
 
 
