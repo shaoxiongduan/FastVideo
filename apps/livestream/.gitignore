@@ -1,5 +1,0 @@
-.env
-outputs/
-hls/
-__pycache__/
-.pytest_cache/

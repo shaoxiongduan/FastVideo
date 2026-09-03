@@ -1,18 +1,15 @@
-"""Configuration: the app's environment settings and the engine's YAML shape.
+"""Configuration: one YAML file, plus secrets from the environment.
 
-Two things are configured, and they come from different places on purpose.
+`configs/livestream.yaml` holds everything the app is configured with: what the
+checkpoint is asked for, how it is hosted, and how the deployment behaves.
+Point at a copy of it with `--config`.
 
-* :class:`Config` -- what this *deployment* does: which chat sources feed it,
-  which preset it runs, where the video goes, which LLM rewrites prompts. All
-  from the environment (a `.env` file is loaded when present), because these
-  are per-deployment secrets and switches.
-* :class:`ModelConfig` -- what the *checkpoint* is asked for: clip geometry,
-  sparse-attention kernels, GPU count, compile policy. From a YAML under
-  `serve_configs/`, because these are tuned values that belong in version
-  control next to the code that reads them.
+API keys stay in the environment, because a key in a version-controlled file is
+a key that leaks. `LIVESTREAM_WEIGHTS_PATH` is there too, being a property of
+the machine rather than of the deployment.
 
-`Config.load` and `load_model_config` are the only readers of either; nothing
-else in the package touches `os.environ` or parses YAML.
+`load_config` is the only reader of either; nothing else touches `os.environ`
+or parses YAML.
 """
 
 from __future__ import annotations
@@ -25,14 +22,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from dotenv import load_dotenv
 
 from . import clip_plan
-
-
-def _flag(value: str | None) -> bool:
-    return (value or "").strip().lower() in ("1", "true", "yes", "on")
-
 
 # ---------------------------------------------------------------- presets
 
@@ -41,35 +32,39 @@ class PresetError(ValueError):
     """A preset file is missing or malformed."""
 
 
-def presets_dir() -> Path:
-    return Path(__file__).parent / "presets"
+DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "livestream.yaml"
+
+# Where the playlist goes when the config does not say. A relative default
+# would write into whatever directory the server was started from, which for a
+# source checkout is the repo root. Mirrors how `apps/dreamverse` picks its
+# state root.
+_STATE_ROOT = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "fastvideo-livestream"
+DEFAULT_HLS_DIR = _STATE_ROOT / "hls"
+DEFAULT_FILLERS_DIR = Path(__file__).parent / "presets"
+PRESET_FILE = "fillers.json"
 
 
-def load_preset(name_or_path: str) -> dict:
-    """Load and validate one preset: the creative bundle the stream runs.
+def load_preset(directory: str | Path) -> dict:
+    """Load and validate the style and idle prompts the stream runs on.
 
-    A bare name resolves against `presets/`; a value with a path separator or
-    a `.json` suffix is used as a path. The format is `style` (the block every
-    upsampled scene is written in) and `idle_prompts` (which may be empty,
-    disabling the filler); other keys are ignored, so a preset can carry its
-    own notes.
+    `directory` holds `fillers.json`: the `style` every rewritten scene is
+    written in, and the `idle_prompts` that keep the stream fed when nobody is
+    typing. An empty prompt list disables the filler. Other keys are ignored,
+    so the file can carry its own notes.
     """
-    if "/" in name_or_path or name_or_path.endswith(".json"):
-        path = Path(name_or_path)
-    else:
-        path = presets_dir() / f"{name_or_path}.json"
+    path = Path(directory) / PRESET_FILE
     if not path.is_file():
-        raise PresetError(f"preset not found: {path}")
+        raise PresetError(f"no {PRESET_FILE} in {directory}")
     try:
         preset = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
-        raise PresetError(f"preset {path} is not valid JSON: {error}") from None
+        raise PresetError(f"{path} is not valid JSON: {error}") from None
     style = preset.get("style")
     prompts = preset.get("idle_prompts")
     if not isinstance(style, str) or not style.strip():
-        raise PresetError(f"preset {path} needs a non-empty string `style`")
+        raise PresetError(f"{path} needs a non-empty string `style`")
     if not isinstance(prompts, list) or not all(isinstance(p, str) for p in prompts):
-        raise PresetError(f"preset {path} needs `idle_prompts` as a list of strings")
+        raise PresetError(f"{path} needs `idle_prompts` as a list of strings")
     return {
         "style": style.strip(),
         "idle_prompts": [p.strip() for p in prompts if p.strip()],
@@ -78,7 +73,7 @@ def load_preset(name_or_path: str) -> dict:
 
 # ------------------------------------------------------------ model config
 
-# Component directories the T2VA pipeline loads. An incomplete bundle must kill
+# Component directories the T2VA pipeline loads. Missing weights must kill
 # startup, not surface as a loader traceback on the first clip.
 REQUIRED_COMPONENTS = (
     "transformer",
@@ -90,8 +85,6 @@ REQUIRED_COMPONENTS = (
     "scheduler",
     "audio_scheduler",
 )
-
-DEFAULT_MODEL_CONFIG = Path(__file__).resolve().parents[1] / "serve_configs" / "fasth3.yaml"
 
 
 @dataclass(frozen=True)
@@ -117,13 +110,16 @@ class ModelConfig:
 
 
 def load_model_config(config_path: Path | None = None) -> ModelConfig:
-    """Parse the engine YAML into a validated :class:`ModelConfig`.
+    """Read the `inference` and `runtime` blocks into a validated `ModelConfig`.
+
+    The same file `Config.load` reads. Split out because the queues and the
+    backend need the checkpoint's shape, and nothing else in the file.
 
     Raises:
         ValueError: If the configured aspect is not one the checkpoint offers,
             or a queue size is not positive.
     """
-    path = config_path or DEFAULT_MODEL_CONFIG
+    path = config_path or DEFAULT_CONFIG
     document: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     inference: dict[str, Any] = document.get("inference") or {}
     runtime: dict[str, Any] = document.get("runtime") or {}
@@ -159,7 +155,7 @@ def load_model_config(config_path: Path | None = None) -> ModelConfig:
 def _parse_warmup_lengths(raw: Any, clip_frames: int) -> tuple[int, ...]:
     """Resolve ``inference.warmup_lengths`` to the frame counts load() warms.
 
-    ``"default"`` (or nothing) warms only the session's default length;
+    ``"default"`` (or nothing) warms only the configured clip length;
     ``"all"`` warms every length the checkpoint can generate; a list of
     seconds warms those, snapped to legal lengths. The default length is
     always included -- it is the shape every plain enqueue uses.
@@ -177,7 +173,7 @@ def _parse_warmup_lengths(raw: Any, clip_frames: int) -> tuple[int, ...]:
 
 
 def resolve_model_path(config: ModelConfig, weights_root: Path) -> Path:
-    """The checkpoint directory inside the bundle; "." means the root itself."""
+    """The checkpoint directory under the weights path; "." means the path itself."""
     subdir = str(config.runtime.get("checkpoint_dir", "."))
     if subdir in ("", "."):
         return weights_root
@@ -185,7 +181,7 @@ def resolve_model_path(config: ModelConfig, weights_root: Path) -> Path:
 
 
 def require_weights(root: Path, model_path: Path) -> None:
-    """Fail startup loudly when the weights bundle is incomplete."""
+    """Fail startup loudly when the weights are incomplete."""
     problems: list[str] = []
     if not model_path.is_dir():
         problems.append(f"checkpoint directory is missing: {model_path}")
@@ -197,7 +193,7 @@ def require_weights(root: Path, model_path: Path) -> None:
             if not (model_path / component).is_dir():
                 problems.append(f"component directory is missing: {model_path / component}")
     if problems:
-        raise FileNotFoundError(f"FastH3 weights bundle under {root} is incomplete:\n  " + "\n  ".join(problems))
+        raise FileNotFoundError(f"FastH3 weights under {root} are incomplete:\n  " + "\n  ".join(problems))
 
 
 # -------------------------------------------------------------- app config
@@ -209,7 +205,7 @@ class Config:
 
     # The engine: where the weights live and which YAML shapes it
     weights_path: Path
-    model_config_path: Path | None
+    config_path: Path
 
     # Upsampling
     openai_api_key: str
@@ -220,8 +216,7 @@ class Config:
     # whatever look suits it. Set 0 to put every clip in the house style.
     viewer_free_style: bool
 
-    # Preset: the creative bundle (style + premade idle prompts)
-    preset_name: str
+    # The style every scene is written in, and the idle prompts
     style: str
     idle_prompts: tuple[str, ...]
 
@@ -251,58 +246,54 @@ class Config:
 
     @staticmethod
     def load(argv: list[str] | None = None) -> Config:
-        """Read `.env` + environment, apply CLI overrides, and validate."""
+        """Read the config file and the environment, and validate the result."""
         parser = argparse.ArgumentParser(description="Chat-driven FastH3 livestream (see README.md).")
-        parser.add_argument("--env-file", default=None, help="path to a .env file")
+        parser.add_argument("--config", default=None, help=f"config YAML (default {DEFAULT_CONFIG})")
         parser.add_argument("--weights", default=None, help="override LIVESTREAM_WEIGHTS_PATH")
-        parser.add_argument(
-            "--model-config",
-            default=None,
-            help="engine YAML (default serve_configs/fasth3.yaml)",
-        )
-        parser.add_argument("--preset", default=None, help="override PRESET")
-        parser.add_argument("--port", default=None, type=int, help="override WEB_PORT")
+        parser.add_argument("--port", default=None, type=int, help="override web.port")
         args = parser.parse_args(argv)
 
-        if args.env_file:
-            load_dotenv(args.env_file, override=True)
-        else:
-            load_dotenv()  # ./.env when present; no-op otherwise
-
-        openai_api_key = os.environ.get("OPENAI_API_KEY", "")
-        openai_base_url = os.environ.get("OPENAI_BASE_URL") or None
-
-        preset_name = args.preset or os.environ.get("PRESET", "unhinged")
-        try:
-            preset = load_preset(preset_name)
-        except PresetError as error:
-            raise SystemExit(f"{error} (set PRESET or --preset)") from None
+        path = Path(args.config).expanduser() if args.config else DEFAULT_CONFIG
+        if not path.is_file():
+            raise SystemExit(f"config not found: {path}")
+        document: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        upsampler = document.get("upsampler") or {}
+        moderation = document.get("moderation") or {}
+        director = document.get("director") or {}
+        output = document.get("output") or {}
+        web = document.get("web") or {}
 
         weights = args.weights or os.environ.get("LIVESTREAM_WEIGHTS_PATH", "")
-        model_config = args.model_config or os.environ.get("LIVESTREAM_MODEL_CONFIG") or None
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
+        fillers = director.get("fillers")
+        try:
+            preset = load_preset(Path(fillers).expanduser() if fillers else DEFAULT_FILLERS_DIR)
+        except PresetError as error:
+            raise SystemExit(str(error)) from None
 
         config = Config(
             weights_path=Path(weights).expanduser() if weights else Path(),
-            model_config_path=Path(model_config).expanduser() if model_config else None,
-            openai_api_key=openai_api_key,
-            openai_base_url=openai_base_url,
-            openai_model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-            max_chunks=max(1, int(os.environ.get("MAX_CHUNKS", "6"))),
-            viewer_free_style=_flag(os.environ.get("VIEWER_FREE_STYLE", "1")),
-            preset_name=preset_name,
+            config_path=path,
+            openai_api_key=openai_key,
+            openai_base_url=upsampler.get("base_url") or None,
+            openai_model=str(upsampler.get("model", "gpt-4o-mini")),
+            max_chunks=max(1, int(upsampler.get("max_chunks", 6))),
+            viewer_free_style=bool(upsampler.get("viewer_free_style", True)),
             style=preset["style"],
             idle_prompts=tuple(preset["idle_prompts"]),
-            moderation_enabled=_flag(os.environ.get("MODERATION_ENABLED", "1")),
-            moderation_api_key=os.environ.get("MODERATION_API_KEY") or openai_api_key,
-            moderation_base_url=os.environ.get("MODERATION_BASE_URL") or openai_base_url,
-            moderation_model=os.environ.get("MODERATION_MODEL", "omni-moderation-latest"),
-            idle_queue_target=int(os.environ.get("IDLE_QUEUE_TARGET", "6")),
-            hls_dir=os.environ.get("HLS_DIR", "./hls"),
-            video_bitrate_k=int(os.environ.get("VIDEO_BITRATE_K", "4500")),
-            web_host=os.environ.get("WEB_HOST", "0.0.0.0"),
-            web_port=args.port or int(os.environ.get("WEB_PORT", "8081")),
-            chat_command=os.environ.get("CHAT_COMMAND", "!prompt").strip(),
-            chat_cooldown_s=float(os.environ.get("CHAT_COOLDOWN_S", "10")),
+            moderation_enabled=bool(moderation.get("enabled", True)),
+            # Falls back to the upsampling credentials, which is right when one
+            # endpoint serves both.
+            moderation_api_key=os.environ.get("MODERATION_API_KEY") or openai_key,
+            moderation_base_url=moderation.get("base_url") or upsampler.get("base_url") or None,
+            moderation_model=str(moderation.get("model", "omni-moderation-latest")),
+            idle_queue_target=int(director.get("idle_queue_target", 6)),
+            hls_dir=str(output.get("hls_dir") or DEFAULT_HLS_DIR),
+            video_bitrate_k=int(output.get("video_bitrate_k", 4500)),
+            web_host=str(web.get("host", "0.0.0.0")),
+            web_port=args.port or int(web.get("port", 8081)),
+            chat_command=str(director.get("chat_command", "!prompt")).strip(),
+            chat_cooldown_s=float(director.get("chat_cooldown_s", 10)),
         )
         config.validate()
         return config
@@ -310,11 +301,13 @@ class Config:
     def validate(self) -> None:
         """Fail fast on contradictions instead of half-starting."""
         if not str(self.weights_path) or self.weights_path == Path():
-            raise SystemExit("LIVESTREAM_WEIGHTS_PATH (or --weights) must point at the FastH3 bundle.")
+            raise SystemExit("Set LIVESTREAM_WEIGHTS_PATH, or pass --weights, pointing at the FastH3 weights.")
         if not self.openai_api_key:
-            raise SystemExit("OPENAI_API_KEY is required for prompt upsampling.")
+            raise SystemExit(
+                "Set OPENAI_API_KEY. Prompt rewriting runs for the idle filler too, so the stream does not start without it."
+            )
         if not self.chat_command.startswith("!"):
-            raise SystemExit("CHAT_COMMAND should start with '!' (e.g. !prompt).")
+            raise SystemExit("director.chat_command should start with '!' (e.g. !prompt).")
 
 
 __all__ = [

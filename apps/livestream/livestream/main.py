@@ -15,8 +15,9 @@ The pacer and the sink start before the model, so a viewer arriving during the
 connection.
 
 Usage:
-    cp .env.example .env      # keys, preset, weights
-    livestream-server
+    export OPENAI_API_KEY=... LIVESTREAM_WEIGHTS_PATH=/path/to/fasth3
+    livestream-server                       # configs/livestream.yaml
+    livestream-server --config my.yaml      # or a copy of it
 """
 
 from __future__ import annotations
@@ -46,11 +47,11 @@ def setup_logging() -> None:
 
 async def serve(config: Config) -> None:
     """Build every component, wire them together, and run until one dies."""
-    model_config = load_model_config(config.model_config_path)
+    model_config = load_model_config(config.config_path)
 
-    # Constructing the engine validates the weights bundle without loading the
-    # model, so a broken bundle fails in milliseconds rather than after three
-    # minutes of GPU work.
+    # Constructing the engine checks the weights without loading the model, so
+    # a missing component fails in milliseconds rather than after minutes of
+    # GPU work.
     engine = Engine(config, model_config)
 
     upsampler = PromptUpsampler(
@@ -124,8 +125,8 @@ async def serve(config: Config) -> None:
     else:
         logger.info("idle filler off (IDLE_QUEUE_TARGET=0)")
 
-    logger.info("streaming %dx%d@%dfps, preset %r, chat command %r, page on http://%s:%d", width, height, MODEL_FPS,
-                config.preset_name, config.chat_command, config.web_host, config.web_port)
+    logger.info("streaming %dx%d@%dfps, %d idle prompts, chat command %r, page on http://%s:%d", width, height,
+                MODEL_FPS, len(config.idle_prompts), config.chat_command, config.web_host, config.web_port)
     try:
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:

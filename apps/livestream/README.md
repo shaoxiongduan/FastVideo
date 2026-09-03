@@ -1,128 +1,188 @@
-# livestream — a chat-driven FastH3 broadcast
+# Livestream
 
-Viewers type prompts into a web page; the app rewrites them, generates clips
-on FastVideo, and plays them back as one continuous stream on that same page.
-When nobody is typing it keeps itself fed from a preset of idle prompts, so
-the channel never goes dark.
+Livestream is a chat-driven FastH3 broadcast. Viewers type prompts into a web
+page, the app rewrites them with an LLM, generates clips with FastVideo, and
+plays them back as one continuous HLS stream on that same page. When nobody is
+typing it feeds itself from a preset of idle prompts, so the channel never goes
+dark.
+
+It lives in this monorepo under `apps/livestream/`.
 
 ```
-chat ──▶ Director ──▶ PromptUpsampler (any OpenAI-compatible LLM)
-            │
-            ▼ enqueue / move / pop
-          Engine ──▶ FastH3Backend ──▶ FastVideo (4 GPUs, VSA + FA4)
-            │ frames + audio
-            ▼
-          Pacer ──▶ HlsSink ──▶ the page's <video>
+chat -> Director -> PromptUpsampler (OpenAI-compatible LLM)
+           |
+           v enqueue / move / pop
+        Engine -> FastH3Backend -> FastVideo
+           |  frames + audio
+           v
+        Pacer -> HlsSink -> the page's <video>
 ```
 
-The page is the only way in and the only way out: there is no Twitch or
-YouTube integration and no RTMP target, because a chat box on the same origin
-as the video is all this needs.
+Everything runs in a single process, and the page, the playlist and the chat
+endpoint are served from one HTTP origin, so publishing the stream means
+pointing a tunnel or reverse proxy at one port.
 
-## One process, on purpose
+## Requirements
 
-The generator and the broadcast run in the same interpreter, so a finished
-clip is handed to the pacer as the numpy arrays it already is. There is no
-transport in between and therefore nothing that can shed frames: the pacer's
-video and audio buffers move together or not at all.
+- FastH3 weights. Set `LIVESTREAM_WEIGHTS_PATH` to the model directory. It
+  needs `transformer`, `text_encoder`, `tokenizer`, `processor`, `vae`,
+  `audio_vae`, `scheduler`, `audio_scheduler` and `modular_model_index.json`.
+- GPUs for the generator. `configs/livestream.yaml` ships `num_gpus: 4`;
+  the count must divide the model's attention head count.
+- An API key for an OpenAI-compatible endpoint. Prompt rewriting is on the
+  path for the idle filler too, so the stream does not run without one.
+- `ffmpeg` on `PATH`.
 
-`Engine` is the whole model side — the two clip queues, the build pump, and
-the playout loop. It exposes three commands (`enqueue`, `pop`, `move`) and
-broadcasts state as messages (`clip_queued`, `clip_generated`, `clip_started`,
-`clip_finished`, `queue_update`, `state_update`) to in-process listeners.
+## Install
 
-## The two queues
-
-A clip is requested, then built, then played, and each stage is a queue:
-
-* the **generation queue** holds accepted requests; builds consume it front
-  first, one at a time;
-* the **playout queue** holds built clips waiting their turn. Each entry holds
-  a fully decoded clip in host memory, so its capacity is also the memory
-  budget.
-
-Generation pauses while the playout queue is full — a finished build needs a
-slot to land in, and that pause is the reservation that makes the later add
-impossible to overflow. The director curates the front of the playout queue so
-a viewer's clip plays before filler.
-
-## Configuration
-
-Two files, split by what they describe:
-
-* `serve_configs/fasth3.yaml` — what the *checkpoint* is asked for: clip
-  length, canvas, sparse-attention kernels, GPU count, compile policy. Tuned
-  values, in version control.
-* `.env` — what this *deployment* does: which LLM rewrites prompts, which
-  preset it runs, where the playlist goes. Secrets and switches, not in
-  version control.
-
-`config.py` is the only reader of either; nothing else touches `os.environ`.
-
-`LIVESTREAM_WEIGHTS_PATH` points at the FastH3 bundle. The bundle is checked
-for completeness at startup, before any GPU work, so a missing component is a
-one-line error rather than a loader traceback five minutes in.
-
-## Running it
+From a FastVideo source checkout:
 
 ```bash
 uv pip install -e apps/livestream
-cp apps/livestream/.env.example .env      # keys, weights, preset
+```
+
+The app needs the FastVideo runtime extras (torch, `fastvideo-kernel` with the
+Blackwell VSA extension, and flash-attn-4), plus `ffmpeg` on `PATH`.
+
+## Quick start
+
+```bash
+export OPENAI_API_KEY=...
+export LIVESTREAM_WEIGHTS_PATH=/path/to/fasth3
 livestream-server
 ```
 
-The web page and the HLS stream come up immediately; the model loads behind
-them, so a viewer arriving during startup sees the page and a live black
-stream rather than a refused connection.
+The page and the HLS stream come up immediately on the configured port. The
+model loads behind them, so a viewer arriving during startup sees the page and
+a live black stream rather than a refused connection. Loading takes a few
+minutes, most of it weight loading and the compile warm-up.
+
+## Configuration
+
+`configs/livestream.yaml` holds everything the app is configured with. Copy it
+and pass your own with `--config`:
+
+```bash
+livestream-server --config my-livestream.yaml
+```
+
+| Block | Contents |
+|---|---|
+| `inference` | What the checkpoint is asked for: clip length, canvas, sparse-attention kernels, compile policy. |
+| `runtime` | How it is hosted: GPU count, sharding, offload. |
+| `upsampler` | Prompt rewriting: model, endpoint, how many clips one prompt may become. |
+| `moderation` | Whether viewer prompts are checked, and against which endpoint. |
+| `director` | Idle filler depth, per-viewer cooldown, chat command, filler directory. |
+| `output` | Where the playlist is written (defaults under `$XDG_STATE_HOME`), and the video bitrate. |
+| `web` | Bind address and port. |
+
+Two settings stay in the environment. API keys, because a key in a
+version-controlled file is a key that leaks, and the weights path, because it
+is a property of the machine rather than of the deployment.
+
+| Variable | Description |
+|---|---|
+| `OPENAI_API_KEY` | Required. Prompt rewriting runs for the idle filler too, so the stream does not start without it. |
+| `LIVESTREAM_WEIGHTS_PATH` | Required. FastH3 model directory. `--weights` overrides it. |
+| `MODERATION_API_KEY` | Optional. Falls back to `OPENAI_API_KEY`. |
+
+## Clip geometry
+
+Clip geometry is fixed by the checkpoint: 24 fps, frame counts of the form
+`17n + 5`, lengths between 5 and 15 seconds, and a 768 pixel short edge.
+`inference.clip_seconds: 14.375` is the longest clip it can produce, at 345
+frames.
+
+Keeping one clip length means one compiled shape. Setting
+`inference.warmup_lengths: all` warms every legal length instead, which makes
+startup slower but avoids a one-off compile stall on a viewer's first
+odd-length clip.
+
+## API Endpoints
+
+| Route | Description |
+|---|---|
+| `GET /` | The watch page. |
+| `GET /assets/<file>` | Logo and favicon. |
+| `GET /hls/<file>` | Playlist and segments, written by `livestream/sink.py`. |
+| `GET /healthz` | `{"connected": bool}`, true once the model is loaded. |
+| `WS /state` | One JSON snapshot on connect, then one per change. |
+| `POST /chat` | `{"author": str, "text": str}`. Returns 429 with `retry_after` when that viewer is still on cooldown. |
+
+The cooldown is answered by `POST /chat` rather than reported later, so the
+sender's page can disable its send box and count down. The chat feed is shared
+by every viewer, so refusals are kept out of it.
+
+## Idle fillers
+
+When nobody is typing, the stream keeps itself fed from a list of prompts.
+`director.fillers` names the directory holding `fillers.json`, and defaults to
+the one that ships in `livestream/presets/`.
+
+```json
+{
+  "style": "the look and tone every scene is written in",
+  "idle_prompts": ["a lighthouse keeper teaching a seagull to play chess"]
+}
+```
+
+`style` is applied to every rewritten scene, viewer prompts included.
+`idle_prompts` feeds the filler; an empty list turns the filler off, as does
+`director.idle_queue_target: 0`.
+
+To change the stream's identity, copy the directory, edit `fillers.json` and
+point `director.fillers` at it. The file is read once, at startup.
+
+## Now-playing titles
+
+Each viewer sits at a different point in the stream, so the server cannot say
+what is on screen. It publishes which clip occupies which instant, and the page
+locates itself against that.
+
+Where a browser reports the date of the frame it is showing, the page uses it
+directly. Most browsers report nothing, so the page falls back to the live edge
+the server publishes minus how far behind its own buffer edge it is playing.
+Append `?debug=1` to the page URL to see which source answered.
 
 ## Tests
-
-`livestream/tests/` runs on any machine:
 
 ```bash
 pytest apps/livestream/livestream/tests -m "not gpu"
 ```
 
-The `gpu` marker covers one test: the assertion that `clip_plan`'s copy of
-MiniMax-H3's packing constants still matches FastVideo's. Importing the
-upstream module needs a live CUDA driver, so run that one whenever the pinned
-FastVideo version moves.
+One test is marked `gpu`. It checks that `livestream/clip_plan.py`'s copy of
+MiniMax-H3's packing constants still matches FastVideo's, and importing the
+upstream module needs a live CUDA driver. Run it when the pinned FastVideo
+version moves.
 
-## Keeping the title on the picture
+## Adding another model
 
-Every viewer sits at a different point in the stream, so the server cannot say
-what is on screen — it can only say which clip occupies which instant, and the
-page has to locate itself. Where a browser reports the date of the frame it is
-showing, that is used directly. Most do not, so the page falls back to the
-live edge the server publishes minus how far behind its own buffer edge it is
-playing, averaged over more than a segment and carried on `currentTime`.
+`FastH3Backend.submit(frames, prompt, seed, height, width)` is the seam.
+Everything above it, meaning the engine, director, queues, pacer, sink and web
+app, is model-agnostic. Everything below it is MiniMax-H3 specific:
+`clip_plan.py` is its geometry and `backend.py` selects its kernels.
 
-`?debug=1` shows which source answered and how far behind live the viewer is.
+A second checkpoint needs its own geometry module and its own backend behind
+that seam. LTX-2, for example, packs `8n + 1` frames at different resolutions.
 
-## Rate limiting
+## Troubleshooting
 
-One prompt per viewer per `CHAT_COOLDOWN_S`. It is answered by `POST /chat`
-itself with a 429 and a `retry_after`, so the sender's page can grey out its
-send box and count down while everyone else's view stays clean — the chat feed
-is shared, and one person's rate-limit is not the room's business.
+**`ffmpeg not found on PATH`.** The sink checks for it at construction. Install
+it, or see `apps/dreamverse/scripts/install_native_ffmpeg.sh`.
 
-The real backpressure is the viewer-clip budget: a queue already full of
-viewer content refuses more, which is why the cooldown can be short.
+**The weights are incomplete.** Startup lists the missing components before
+any GPU work begins. The model directory needs `transformer`, `text_encoder`,
+`tokenizer`, `processor`, `vae`, `audio_vae`, `scheduler`, `audio_scheduler`
+and `modular_model_index.json`.
 
-## Presets
+**`FastH3's sm100a route needs fastvideo-kernel built with the Blackwell VSA
+extension`.** Startup checks for the fast sparse-attention kernel before
+loading any weights. Install a `fastvideo-kernel` build that carries it, or set
+`vsa_kernel: triton` in the engine YAML to use the slower fallback.
 
-A preset is one JSON bundle: the `style` block every rewritten scene is
-written in, plus the `idle_prompts` that keep the stream fed. Three ship:
-`unhinged` (mashups; the default), `variety` (iconic properties played
-straight), and `default` (the original conservative set). Pick one with
-`PRESET`; a path or `*.json` value loads a file from anywhere.
+**`FastH3's FA4 route needs the pinned flash-attn-4 package`.** Install it, or
+set `fa4: false` in the engine YAML.
 
-## What is deliberately not here
-
-The app targets FastH3 only. `clip_plan.py` is MiniMax-H3's geometry (24 fps,
-17n+5 frame packing, a 5-15 s window, a 768 short edge) and `backend.py`'s
-profile environment selects H3's sparse-attention kernels. A second checkpoint
--- LTX-2 packs 8n+1 frames at its own resolutions -- wants its own geometry
-module and its own backend behind the same `submit()` seam, not edits to
-these. Nothing above that seam (director, queues, pacer, sinks, web) is
-model-specific.
+**A clip takes much longer than the others.** Each distinct clip length is a
+separate compiled shape, and the first clip at a new length pays a one-off
+compile cost. `warmup_lengths: all` pays all of them at startup instead.

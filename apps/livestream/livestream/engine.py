@@ -211,7 +211,7 @@ class Engine:
 
         seed = data.get("seed")
         if not isinstance(seed, int):
-            # The session's advancing default; an explicit seed leaves it
+            # The stream's advancing default; an explicit seed leaves it
             # untouched, so explicit and automatic seeding do not interfere.
             seed = self._seed
             self._seed += 1

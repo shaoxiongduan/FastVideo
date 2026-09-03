@@ -111,7 +111,7 @@ class FastH3Backend:
         logger.info("backend loaded")
 
     def _load_tokenizer(self) -> None:
-        """Load the bundle's tokenizer and calibrate the one-token pad filler.
+        """Load the checkpoint's tokenizer and calibrate the one-token pad filler.
 
         Padding must land on an exact token count, so the filler is verified to
         cost exactly one token at load rather than assumed.
