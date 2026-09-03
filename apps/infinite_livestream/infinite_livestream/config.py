@@ -32,7 +32,10 @@ class PresetError(ValueError):
     """A preset file is missing or malformed."""
 
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "infinite_livestream.yaml"
+# Inside the package, so it survives installation: the app ships as part of
+# fastvideo, and anything beside the package rather than in it is not
+# packaged.
+DEFAULT_CONFIG = Path(__file__).parent / "configs" / "infinite_livestream.yaml"
 
 # Where the playlist goes when the config does not say. A relative default
 # would write into whatever directory the server was started from, which for a

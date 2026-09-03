@@ -27,7 +27,7 @@ pointing a tunnel or reverse proxy at one port.
 - FastH3 weights. Set `LIVESTREAM_WEIGHTS_PATH` to the model directory. It
   needs `transformer`, `text_encoder`, `tokenizer`, `processor`, `vae`,
   `audio_vae`, `scheduler`, `audio_scheduler` and `modular_model_index.json`.
-- GPUs for the generator. `configs/infinite_livestream.yaml` ships `num_gpus: 4`;
+- GPUs for the generator. `infinite_livestream/configs/infinite_livestream.yaml` ships `num_gpus: 4`;
   the count must divide the model's attention head count.
 - An API key for an OpenAI-compatible endpoint. Prompt rewriting is on the
   path for the idle filler too, so the stream does not run without one.
@@ -35,14 +35,22 @@ pointing a tunnel or reverse proxy at one port.
 
 ## Install
 
-From a FastVideo source checkout:
+The app ships as part of FastVideo, under the `infinite-livestream` extra.
+From a source checkout:
 
 ```bash
-uv pip install -e apps/infinite_livestream
+uv pip install -e ".[infinite-livestream]"
 ```
 
-The app needs the FastVideo runtime extras (torch, `fastvideo-kernel` with the
-Blackwell VSA extension, and flash-attn-4), plus `ffmpeg` on `PATH`.
+Or from PyPI:
+
+```bash
+uv pip install "fastvideo[infinite-livestream]"
+```
+
+Either way you also need the FastVideo runtime, which for this app means a
+`fastvideo-kernel` build carrying the Blackwell VSA extension and
+`flash-attn-4`, plus `ffmpeg` on `PATH`.
 
 ## Quick start
 
@@ -59,7 +67,7 @@ minutes, most of it weight loading and the compile warm-up.
 
 ## Configuration
 
-`configs/infinite_livestream.yaml` holds everything the app is configured with. Copy it
+`infinite_livestream/configs/infinite_livestream.yaml` holds everything the app is configured with. Copy it
 and pass your own with `--config`:
 
 ```bash

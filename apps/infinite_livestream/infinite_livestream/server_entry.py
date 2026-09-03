@@ -15,11 +15,12 @@ def cli() -> None:
     except ModuleNotFoundError as exc:
         if exc.name in {"fastvideo", "torch", "torchaudio", "transformers"}:
             raise SystemExit("infinite-livestream-server requires FastVideo runtime deps. Install "
-                             "`fastvideo[livestream]` or run `uv sync --extra infinite-livestream` "
+                             "`fastvideo[infinite-livestream]` or run `uv sync --extra infinite-livestream` "
                              "from the FastVideo checkout.") from exc
-        if exc.name in {"fastapi", "uvicorn", "openai", "dotenv"}:
+        if exc.name in {"fastapi", "numpy", "openai", "uvicorn", "yaml"}:
             raise SystemExit(f"infinite-livestream-server requires the `{exc.name}` package; install "
-                             "the app's dependencies (`uv pip install -e apps/infinite_livestream`).") from exc
+                             "the app's dependencies: "
+                             "uv pip install -e '.[infinite-livestream]'") from exc
         raise
 
     main_cli()
