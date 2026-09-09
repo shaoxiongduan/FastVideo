@@ -240,7 +240,7 @@ class FastH3Backend:
                 present = False
             if not present:
                 raise RuntimeError("FastH3's FA4 route needs the pinned flash-attn-4 package. Install it, "
-                                   "or set inference.fa4: false in fasth3.yaml.")
+                                   "or set inference.fa4: false in your config.")
         if str(cfg.get("vsa_kernel", "sm100a")) == "sm100a":
             try:
                 from fastvideo_kernel import block_sparse_attn_sm100a

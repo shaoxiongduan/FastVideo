@@ -39,14 +39,16 @@ The app ships as part of FastVideo, under the `infinite-livestream` extra.
 From a source checkout:
 
 ```bash
-uv pip install -e ".[infinite-livestream]"
+UV_TORCH_BACKEND=cu126 uv pip install -e ".[infinite-livestream]"
 ```
 
 Or from PyPI:
 
 ```bash
-uv pip install "fastvideo[infinite-livestream]"
+UV_TORCH_BACKEND=cu126 uv pip install "fastvideo[infinite-livestream]"
 ```
+
+Use `UV_TORCH_BACKEND=cu130` instead on CUDA 13.
 
 Either way you also need the FastVideo runtime, which for this app means a
 `fastvideo-kernel` build carrying the Blackwell VSA extension and
